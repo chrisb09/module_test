@@ -1,0 +1,20 @@
+[logging]
+level = "debug"
+
+[provider]
+class = "AIX"
+model_file = "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim/mini_app/train_models/model_a/watercnn_cpu.pt"
+enable_hybrid = false
+
+[normalization]
+class = "MinMax"
+input_min = 0.0
+input_max = 1.0
+output_min = 0.0
+output_max = 1.0
+
+[behavior]
+class = "Default"
+
+[application]
+class = "ModuleTestApplication"

@@ -1,0 +1,34 @@
+# Build and Binary artifacts
+build/
+bin/
+*.o
+*.so
+*.a
+module_test_solver
+
+# SmartSim and Runtime artifacts
+module_tests/
+.smartsim/
+.ssdb_endpoint
+.solver_done
+.wait
+wait
+phydll.log
+phydll-*.log
+*.pt
+*.pb
+*.onnx
+
+# Memory logs and profiling
+mem_logs/
+job_plot.png
+
+# System/Temp
+tmp/
+core.*
+
+# Local dev/IDEs
+.vscode/
+.idea/
+__pycache__/
+*.pyc

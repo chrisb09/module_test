@@ -1,0 +1,30 @@
+[logging]
+level = "debug"
+
+[provider]
+num_gpus = 0
+first_gpu = 0
+class = "Smartsim"
+device = "CPU"
+model_backend = "TORCH"
+model_path = "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim/mini_app/train_models/model_a/watercnn_split_flat_cpu.pt"
+model_name = "watercnn_split_flat"
+nodes = 1
+batch_size = 1
+command_timeout = 900
+socket_timeout = 900
+model_timeout = 900000
+
+
+[normalization]
+class = "MinMax"
+input_min = 0.0
+input_max = 1.0
+output_min = 0.0
+output_max = 1.0
+
+[behavior]
+class = "Default"
+
+[application]
+class = "ModuleTestApplication"
