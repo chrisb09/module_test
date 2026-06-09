@@ -74,22 +74,35 @@ int main(int argc, char** argv)
 	// Create dummy data
 	// ******************************
 
-	// 1 input of size Bx18
-	float* flat_data = new float[18];
-	for (int i = 0; i < 9; ++i) {
-		flat_data[i] = (4 + i * 17) % 100; // First 9 values (water)
-	}
-	for (int i = 0; i < 9; ++i) {
-		flat_data[9 + i] = (7 + i * 24) % 200; // Next 9 values (terrain)
+	const char* model_env = std::getenv("MODEL");
+	std::string model_name = (model_env != nullptr) ? model_env : "";
+	bool is_mmcp = (model_name.find("mmcp") != std::string::npos);
+
+	int in_size = is_mmcp ? (5 * 512) : 18;
+	int out_size = is_mmcp ? (2 * 512) : 1;
+
+	float* flat_data = new float[in_size];
+	if (!is_mmcp) {
+		for (int i = 0; i < 9; ++i) {
+			flat_data[i] = (4 + i * 17) % 100; // First 9 values (water)
+		}
+		for (int i = 0; i < 9; ++i) {
+			flat_data[9 + i] = (7 + i * 24) % 200; // Next 9 values (terrain)
+		}
+	} else {
+		for (int i = 0; i < in_size; ++i) {
+			flat_data[i] = (4 + i * 17) % 100;
+		}
 	}
 
-	for (int i = 0; i < 18; ++i) {
+	for (int i = 0; i < in_size; ++i) {
 		flat_data[i] *= world_rank;
 	}
 
+	std::vector<int> single_shape = is_mmcp ? std::vector<int>{5, 1, 512} : std::vector<int>{1, 18};
 	MLCouplingTensor<float> input_tensor = MLCouplingTensor<float>::wrap_flat(
 		flat_data,
-		std::vector<int>{1, 18},
+		single_shape,
 		MLCouplingMemLayoutContiguous,
 		MLCouplingOwnershipExternal);
 
@@ -102,14 +115,15 @@ int main(int argc, char** argv)
 
 	MLCouplingData<float> output_data;
 
-    float* output_buffer = new float[1];
+    float* output_buffer = new float[out_size];
 
 	// Just to ensure the buffer is changed, we set it to -1 initially
 	output_buffer[0] = -1;
 
+	std::vector<int> out_shape = is_mmcp ? std::vector<int>{1, 2, 512} : std::vector<int>{1};
     output_data.add_tensor(MLCouplingTensor<float>::wrap_flat(
 		output_buffer,
-		std::vector<int>{1},
+		out_shape,
 		MLCouplingMemLayoutContiguous,
 		MLCouplingOwnershipExternal
 	));
@@ -157,60 +171,57 @@ int main(int argc, char** argv)
 			std::cout << "--- Coupling Step " << step << " ---\n";
 		}
 		// Increase the input data's values by step number to simulate changing input across steps
-		for (size_t i = 0; i < 18; ++i) {
+		for (size_t i = 0; i < in_size; ++i) {
 			flat_data[i] += step;
 		}
 		try {
 			if (api_mode == "STATIC") {
 				coupling->ml_step();
 			} else if (api_mode == "ORDERED") {
-				std::vector<int> shape{1, 18};
 				MLCouplingData<float> current_input{std::vector<MLCouplingTensor<float>>{
-					MLCouplingTensor<float>::wrap_flat(flat_data, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
+					MLCouplingTensor<float>::wrap_flat(flat_data, single_shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
 				}};
 				coupling->ordered()
 					.set(current_input)
 					.inference()
 					.get(output_data);
 			} else if (api_mode == "KEYED") {
-				std::vector<int> shape{1, 18};
 				MLCouplingData<float> current_input{std::vector<MLCouplingTensor<float>>{
-					MLCouplingTensor<float>::wrap_flat(flat_data, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
+					MLCouplingTensor<float>::wrap_flat(flat_data, single_shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
 				}};
 				coupling->keyed()
 					.set("input_0", current_input)
 					.inference({"input_0"}, {"output_0"})
 					.get("output_0", output_data);
 			} else if (api_mode == "ORDERED_MULTI") {
-				// Split 18 into two 1x9 tensors
-				std::vector<int> shape{1, 9};
-				MLCouplingData<float> input_1{std::vector<MLCouplingTensor<float>>{
-					MLCouplingTensor<float>::wrap_flat(flat_data, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
-				}};
-				MLCouplingData<float> input_2{std::vector<MLCouplingTensor<float>>{
-					MLCouplingTensor<float>::wrap_flat(flat_data + 9, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
-				}};
-
-				coupling->ordered()
-					.set(input_1)
-					.set(input_2)
-					.inference()
-					.get(output_data);
+				int num_inputs = is_mmcp ? 5 : 2;
+				std::vector<int> shape = is_mmcp ? std::vector<int>{1, 512} : std::vector<int>{1, 9};
+				int offset_step = is_mmcp ? 512 : 9;
+				
+				auto proxy = coupling->ordered();
+				for (int i = 0; i < num_inputs; ++i) {
+					MLCouplingData<float> input_part{std::vector<MLCouplingTensor<float>>{
+						MLCouplingTensor<float>::wrap_flat(flat_data + i * offset_step, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
+					}};
+					proxy.set(input_part);
+				}
+				proxy.inference().get(output_data);
 			} else if (api_mode == "KEYED_MULTI") {
-				// Split 18 into two 1x9 tensors
-				std::vector<int> shape{1, 9};
-				MLCouplingData<float> input_1{std::vector<MLCouplingTensor<float>>{
-					MLCouplingTensor<float>::wrap_flat(flat_data, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
-				}};
-				MLCouplingData<float> input_2{std::vector<MLCouplingTensor<float>>{
-					MLCouplingTensor<float>::wrap_flat(flat_data + 9, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
-				}};
-
-				coupling->keyed()
-					.set("x_water", input_1)
-					.set("x_terrain", input_2)
-					.inference({"x_water", "x_terrain"}, {"output_0"})
-					.get("output_0", output_data);
+				int num_inputs = is_mmcp ? 5 : 2;
+				std::vector<int> shape = is_mmcp ? std::vector<int>{1, 512} : std::vector<int>{1, 9};
+				int offset_step = is_mmcp ? 512 : 9;
+				
+				auto proxy = coupling->keyed();
+				std::vector<std::string> keys;
+				for (int i = 0; i < num_inputs; ++i) {
+					MLCouplingData<float> input_part{std::vector<MLCouplingTensor<float>>{
+						MLCouplingTensor<float>::wrap_flat(flat_data + i * offset_step, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
+					}};
+					std::string key = is_mmcp ? "t" + std::to_string(i) : (i == 0 ? "x_water" : "x_terrain");
+					proxy.set(key, input_part);
+					keys.push_back(key);
+				}
+				proxy.inference(keys, {"output_0"}).get("output_0", output_data);
 			} else {
 				throw std::runtime_error("Unknown API_MODE: " + api_mode);
 			}
