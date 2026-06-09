@@ -111,10 +111,14 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
         export SSDB="$(tr -d '\n' < "${ENDPOINT_FILE}")"
     fi
 
-    "${SMARTSIM_PYTHON}" "${SCRIPT_DIR}/driver.py" \
+    # Use the generalized controller from CPP-ML-Interface
+    SMARTSIM_CONTROLLER="${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/smartsim_controller.py"
+    
+    "${SMARTSIM_PYTHON}" "${SMARTSIM_CONTROLLER}" \
             --endpoint-file "${ENDPOINT_FILE}" \
             --done-file "${DONE_FILE}" \
-            --port "${SS_PORT}" &
+            --port "${SS_PORT}" \
+            --exp-dir "${SCRIPT_DIR}/module_tests" &
     DRIVER_PID=$!
 
     cleanup() {
