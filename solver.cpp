@@ -99,7 +99,7 @@ int main(int argc, char** argv)
 		flat_data[i] *= world_rank;
 	}
 
-	std::vector<int> single_shape = is_mmcp ? std::vector<int>{5, 1, 512} : std::vector<int>{1, 18};
+	std::vector<int> single_shape = is_mmcp ? std::vector<int>{1, 5, 512} : std::vector<int>{1, 18};
 	MLCouplingTensor<float> input_tensor = MLCouplingTensor<float>::wrap_flat(
 		flat_data,
 		single_shape,
@@ -135,16 +135,44 @@ int main(int argc, char** argv)
 	// Create coupling object
 	// *************************************
 
-	MLCoupling<float, float>* coupling = MLCoupling<float, float>::create_from_config(config_path, std::move(input_data), output_data
-	/*,ConfigOverrides{
-		{"provider.device", std::string("GPU")},
-		{"provider.num_gpus", 1}
-	}*/);
+	std::string actual_model_path = "";
+	if (is_mmcp) {
+		actual_model_path = "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/input/transformer_inference_scripted_fw2.pt";
+	} else {
+		const char* base_dir = std::getenv("BASE_DIR");
+		std::string base_dir_str = base_dir ? std::string(base_dir) : "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim";
+		actual_model_path = base_dir_str + "/mini_app/train_models/model_a/" + model_name + "_cpu.pt";
+	}
+
+	MLCoupling<float, float>* coupling = MLCoupling<float, float>::create_from_config(config_path, std::move(input_data), output_data,
+		ConfigCastMode::Strict,
+		ConfigParameterMatchMode::Lenient,
+		ConfigOverrides{
+			{"provider.model_file", actual_model_path}
+		});
 
 	if (coupling == nullptr) {
 		std::cerr << "Failed to create MLCoupling from config.\n";
 		MPI_Finalize();
 		return 2;
+	}
+
+	const char* merge_strategy_env = std::getenv("MERGE_STRATEGY");
+	if (merge_strategy_env != nullptr) {
+		std::string strategy(merge_strategy_env);
+		if (strategy == "STACK") {
+			if (world_rank == 0) std::cout << "Setting merge strategy to STACK\n";
+			coupling->set_merge_strategy(MLCouplingMergeStrategy::Stack);
+		} else if (strategy == "LIST") {
+			if (world_rank == 0) std::cout << "Setting merge strategy to LIST\n";
+			coupling->set_merge_strategy(MLCouplingMergeStrategy::List);
+		} else if (strategy == "AUTO") {
+			if (world_rank == 0) std::cout << "Setting merge strategy to AUTO\n";
+			coupling->set_merge_strategy(MLCouplingMergeStrategy::Auto);
+		} else if (strategy == "NONE") {
+			if (world_rank == 0) std::cout << "Setting merge strategy to NONE\n";
+			coupling->set_merge_strategy(MLCouplingMergeStrategy::None);
+		}
 	}
 
 
