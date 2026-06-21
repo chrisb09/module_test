@@ -14,6 +14,8 @@ export PROVIDER
 export STEPS
 export CLIENTS
 export API_MODE
+export MODEL
+export MERGE_STRATEGY
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,11 +116,18 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     # Use the generalized controller from CPP-ML-Interface
     SMARTSIM_CONTROLLER="${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/smartsim_controller.py"
     
-    "${SMARTSIM_PYTHON}" "${SMARTSIM_CONTROLLER}" \
-            --endpoint-file "${ENDPOINT_FILE}" \
-            --done-file "${DONE_FILE}" \
-            --port "${SS_PORT}" \
-            --exp-dir "${SCRIPT_DIR}/module_tests" &
+    CONTROLLER_ARGS=(
+            "--endpoint-file" "${ENDPOINT_FILE}"
+            "--done-file" "${DONE_FILE}"
+            "--port" "${SS_PORT}"
+            "--exp-dir" "${SCRIPT_DIR}/module_tests"
+    )
+
+    if [[ -n "${OMP_NUM_THREADS:-}" ]]; then
+            CONTROLLER_ARGS+=("--intra-op-threads" "${OMP_NUM_THREADS}" "--cpu-cores-per-node" "${OMP_NUM_THREADS}")
+    fi
+
+    "${SMARTSIM_PYTHON}" "${SMARTSIM_CONTROLLER}" "${CONTROLLER_ARGS[@]}" &
     DRIVER_PID=$!
 
     cleanup() {
@@ -146,7 +155,7 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     SSDB="$(tr -d '\n' < "${ENDPOINT_FILE}")"
     echo "Using SSDB=${SSDB}"
 
-    mpirun -x MODULE_TEST_RUN_ID -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
+    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
 
     touch "${DONE_FILE}"
     wait "${DRIVER_PID}"
@@ -157,7 +166,7 @@ elif [[ "${PROVIDER}" == "AIX" ]]; then
     if [[ "${DEVICE}" == "GPU" ]]; then
         export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
     fi
-    mpirun -x MODULE_TEST_RUN_ID -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
+    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
 
 # 3. PHYDLL Provider
 elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
@@ -189,7 +198,7 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
             fi
     fi
 
-    MPIRUN_ENV=(-x MODULE_TEST_RUN_ID)
+    MPIRUN_ENV=(-x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY)
     if [[ "${DEVICE}" == "GPU" ]]; then
         MPIRUN_ENV+=(-x CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0})
         MPIRUN_ENV+=(-x CUDA_DEVICE_ORDER)

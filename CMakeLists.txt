@@ -55,6 +55,9 @@ add_custom_target(module_test_registry DEPENDS "${GENERATED_REGISTRY}")
 add_executable(module_test_solver solver.cpp)
 add_dependencies(module_test_solver module_test_registry)
 
+# Add the module_test include directory globally for all targets
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/include")
+
 # Use CPP-ML-Interface's exported include paths (including SmartRedis extern headers).
 set(CPPML_DISABLE_REGISTRY_GEN ON CACHE BOOL "Disable CPP-ML-Interface registry generation" FORCE)
 add_subdirectory("${CPP_MODULE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/cpp-ml-interface-build")

@@ -23,7 +23,7 @@ TRAIN_MODELS_DIR = BASE_DIR / "mini_app" / "train_models" / "model_a"
 # Configurations
 PROVIDERS = ["AIX", "PHYDLL", "SMARTSIM"]
 DEVICES = ["CPU", "GPU"]
-MODELS = ["perfect", "transformer", "giant", "watercnn"]
+MODELS = ["perfect", "transformer", "giant", "watercnn", "mmcp_transformer"]
 MULTI_MODELS = ["multi_input"]
 API_MODES = ["STATIC", "ORDERED", "KEYED", "ORDERED_MULTI", "KEYED_MULTI"]
 WORKLOADS = [
@@ -437,26 +437,68 @@ class ResourceMonitor:
 def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
     run_id = f"{int(time.time() * 1000)}_{os.getpid()}"
     env["MODULE_TEST_RUN_ID"] = run_id
+    
+    # Apply CPU limit if requested
+    if args.cpus > 0:
+        env["OMP_NUM_THREADS"] = str(args.cpus)
+        env["MKL_NUM_THREADS"] = str(args.cpus)
+        env["TORCH_NUM_THREADS"] = str(args.cpus)
+        env["TF_NUM_INTRAOP_THREADS"] = str(args.cpus)
+        env["TF_NUM_INTEROP_THREADS"] = "1"
+
     monitor = ResourceMonitor(target_gpu, run_id, run_meta=run_meta, log_dir=log_dir)
     start_time = time.time()
+    pgid = None
     try:
         process = subprocess.Popen(
             cmd, env=env, cwd=str(MODULE_TEST_DIR), 
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
             text=True, start_new_session=True
         )
-        
+        pgid = os.getpgid(process.pid)
         monitor.start(process.pid)
         
         try:
-            stdout, stderr = process.communicate(timeout=1200)
+            stdout, stderr = process.communicate(timeout=300) # 5 minutes timeout
             duration = time.time() - start_time
             success = process.returncode == 0
             output = stdout + stderr
+            if not success:
+                print(f"--- ERROR OUTPUT FOR {env.get('PROVIDER')} {env.get('DEVICE')} ---")
+                print(output)
+                print("---------------------------------------")
+
         except subprocess.TimeoutExpired:
+            print(f"\n[TIMEOUT] Run timed out after 300s. Cleaning up process group {pgid}...")
+            
+            # multi-stage kill logic
+            kill_start = time.time()
+            # 1. Try SIGTERM
             os.killpg(pgid, signal.SIGTERM)
-            stdout, stderr = process.communicate()
-            return False, 1200, 0, 0, 0, 0, 0, "TIMEOUT", "Execution timed out"
+            
+            # 2. Wait and check
+            killed_successfully = False
+            while time.time() - kill_start < 120: # 2 minutes total cleanup window
+                time.sleep(2)
+                # Check if anyone in the group is still alive
+                try:
+                    # Sending signal 0 doesn't kill but checks if process exists
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    killed_successfully = True
+                    break
+                
+                # If still alive after 10s of SIGTERM, escalate to SIGKILL
+                if time.time() - kill_start > 10:
+                    os.killpg(pgid, signal.SIGKILL)
+            
+            if not killed_successfully:
+                print(f"FATAL ERROR: Could not terminate process group {pgid} after 2 minutes!")
+                print("Aborting script execution to prevent system overload.")
+                sys.exit(1)
+            
+            print(f"[Cleanup] Process group {pgid} terminated.")
+            return False, 300, 0, 0, 0, 0, 0, {}, "TIMEOUT", "Execution timed out"
         finally:
             monitor.stop()
 
@@ -498,6 +540,8 @@ def update_toml(toml_path, provider, device, model_name):
     suffix = "cuda" if device == "GPU" else "cpu"
     if model_name == "multi_input":
         model_file = MODULE_TEST_DIR / "multi_input_model.pt"
+    elif model_name == "mmcp_transformer":
+        model_file = Path("/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/input/transformer_inference_scripted_fw2.pt")
     else:
         model_file = TRAIN_MODELS_DIR / f"{model_name}_{suffix}.pt"
     
@@ -536,6 +580,7 @@ parser.add_argument("--models", nargs="+", default=MODELS, help=f"Models to test
 parser.add_argument("--api-modes", nargs="+", default=API_MODES, help=f"API modes to test (default: {API_MODES})")
 parser.add_argument("--workloads", nargs="+", help="Workloads as 'steps/clients' (default: all)")
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
+parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs/Threads to limit (0 = auto)")
 
 args = parser.parse_args()
 
@@ -594,8 +639,12 @@ for provider in PROVIDERS:
             dl_modes = PHYDLL_DL_MODES if provider == "PHYDLL" else ["-"]
             for dl_mode in dl_modes:
                 for api_mode in API_MODES:
-                    # For SmartSim MULTI, we use the corresponding split_flat model variant
-                    if provider == "SMARTSIM" and "MULTI" in api_mode:
+                    # mmcp_transformer only makes sense in MULTI modes for this test
+                    if model == "mmcp_transformer" and "MULTI" not in api_mode:
+                        continue
+
+                    # For SmartSim MULTI, we use the corresponding split_flat model variant (except for mmcp models where we test merge logic)
+                    if provider == "SMARTSIM" and "MULTI" in api_mode and "mmcp" not in model:
                         current_model = f"{model}_split_flat"
                     else:
                         current_model = model
@@ -613,6 +662,12 @@ for provider in PROVIDERS:
                         env["CLIENTS"] = str(clients)
                         env["COMPILE"] = "0"
                         env["MODEL"] = current_model
+                        if "mmcp" in current_model:
+                            env["MERGE_STRATEGY"] = "AUTO"
+                        elif provider == "SMARTSIM" and "MULTI" in api_mode:
+                            env["MERGE_STRATEGY"] = "NONE"
+                        else:
+                            env["MERGE_STRATEGY"] = "LIST"
                         if config_file_name:
                             env["CONFIG_FILE"] = config_file_name
                         
