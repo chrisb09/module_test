@@ -23,6 +23,10 @@ phydll-*.log
 mem_logs/
 job_plot.png
 
+# Profiling output and one-off result excerpts
+timings/
+phydll_only.md
+
 # System/Temp
 tmp/
 core.*
