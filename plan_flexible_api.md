@@ -1,41 +1,49 @@
-# Plan: Testing Flexible API in `module_test`
+# Flexible API in `module_test` — Post-Mortem
 
-## Goal
-Extend the existing `module_test` framework to validate the newly implemented `ordered()` and `keyed()` proxy views and their fallback mechanisms across all three providers (AIXelerator, PhyDLL, and SmartSim).
+This document used to be a forward-looking plan. Both phases it described
+have been implemented and are exercised by `test_matrix.py`. It is kept as a
+short record of what was built and the current shape of the flexible API
+test surface.
 
-## Challenges
-The current test models (`perfect`, `transformer`) expect a **single input tensor** of shape `[1, 18]`.
-* If we test the flexible API by staging the data as a single chunk (e.g., `.set(data_1x18)`), it will work perfectly and validate the proxy views and API plumbing.
-* If we want to test true **multi-input merging** (e.g., `.set(data_1x9_part1).set(data_1x9_part2)`), the fallback will merge this into an `MLCouplingData` object containing **two** tensors. While PhyDLL handles this seamlessly by flattening everything, SmartSim and AIXelerator will pass two distinct tensors to the Torch model, which will throw an error since the model only expects one.
+## What was built (was Phase 1 + Phase 2)
 
-## Proposed Strategy
+### Phase 1 — single-input plumbing & fallback verification
 
-We will implement the tests in two phases to handle this gracefully.
+* `solver.cpp` reads `API_MODE` from the environment and dispatches to one
+  of six modes:
+  * `STATIC` — `coupling->step()` (or `ml_step()`).
+  * `ORDERED` — `coupling->ordered().set(input).inference().get(output)`.
+  * `KEYED` — `coupling->keyed().set("input_1", input).inference({"input_1"}, {"output_1"}).get("output_1", output)`.
+* `run.sh` forwards `API_MODE` and is wired into the Slurm `mpirun` lines
+  for all three providers.
+* `test_matrix.py` adds the `API_MODE` dimension to the matrix.
 
-### Phase 1: API Plumbing & Fallback Verification (Single-Input)
-Validate that the new proxy views work seamlessly with the existing static providers using the current models.
+### Phase 2 — multi-input merging verification
 
-1. **Modify `solver.cpp`:**
-   Introduce an `API_MODE` environment variable.
-   * `API_MODE=STATIC`: Uses `coupling->step();` (Current behavior)
-   * `API_MODE=ORDERED`: Uses `coupling->ordered().set(input_data).inference().get(output_data);`
-   * `API_MODE=KEYED`: Uses `coupling->keyed().set("input_1", input_data).inference({"input_1"}, {"output_1"}).get("output_1", output_data);`
-2. **Update `run.sh` and `test_matrix.py`:**
-   Add the `API_MODE` dimension to the test matrix to ensure all providers pass with the new API structures.
+* New `ORDERED_MULTI` and `KEYED_MULTI` modes in `solver.cpp` split the 18
+  floats into two 9-element tensors (or, for `mmcp_transformer`, the
+  5×512 features into five 512-element tensors) and stage them sequentially
+  or with different keys.
+* `_split_flat` model variants were added so the static SmartSim and AIX
+  paths can accept the same multi-input shape that the test code produces.
+* `MERGE_STRATEGY` was added to control how the flex fallback aggregates
+  inputs into a single `MLCouplingData` collection:
+  * `LIST` — keep all tensors as a list (default for single-input).
+  * `AUTO` — automatic selection (used for `mmcp_transformer`).
+  * `NONE` — no merge (used for SmartSim multi-input, which iterates
+    tensors naturally).
 
-### Phase 2: Multi-Input Merging Verification
-Validate the `merge_data` fallback logic using multiple staged inputs.
+## Current run
 
-1. **Generate Multi-Input Model:**
-   Create a short Python script in `module_test/` (e.g., `generate_multi_model.py`) that exports a simple TorchScript model. This model will explicitly accept two inputs of shape `[1, 9]`, concatenate them, and perform a basic operation to return a `[1, 1]` output.
-2. **Expand `solver.cpp`:**
-   Add `API_MODE=ORDERED_MULTI` and `KEYED_MULTI`. In these modes, the solver splits the 18 floats into two `MLCouplingData` objects of size 9 and stages them sequentially or with different keys.
-3. **Expand Test Matrix:**
-   Run a subset of the test matrix using the new multi-input model and the `_MULTI` API modes to confirm the fallback correctly merges the tensors and the providers successfully execute the inference.
+The matrix (`--batch-sizes 1 7`) sweeps every (provider, dl, api, device,
+model, steps, clients, batch_size) combination. Use
+`analyze_timings.py` to summarize the per-step CSV timings the solver
+emits when `TIMING_LOG` is set.
 
-## Implementation Steps for Next Session
-1. Update `solver.cpp` to include the `API_MODE` switch and the flexible coupling calls.
-2. Update `run.sh` to pass `API_MODE`.
-3. Test Phase 1 (Single-Input flexible calls) across all providers.
-4. Write `generate_multi_model.py`.
-5. Implement Phase 2 (Multi-Input flexible calls) and verify the fallback merging works correctly with SmartSim and AIXelerator.
+## Cross-references
+
+* `api_guide.md` in `CPP-ML-Interface/documentation/` for the full
+  `.ordered()` / `.keyed()` API examples.
+* `~/insights/module_test.md` is the authoritative session log; the
+  old `module_test/INSIGHTS.md` mirror has been removed.
+* `~/insights/phydll_integration.md` for the PhyDLL-side flex behaviour.
