@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <mpi.h>
+#include <chrono>
+#include <fstream>
 
 #include <iomanip> // formatting stuff
 
@@ -78,16 +80,22 @@ int main(int argc, char** argv)
 	std::string model_name = (model_env != nullptr) ? model_env : "";
 	bool is_mmcp = (model_name.find("mmcp") != std::string::npos);
 
-	int in_size = is_mmcp ? (5 * 512) : 18;
-	int out_size = is_mmcp ? (2 * 512) : 1;
+	const char* batch_size_env = std::getenv("BATCH_SIZE");
+	int batch_size = (batch_size_env != nullptr && std::strlen(batch_size_env) > 0) ? std::stoi(batch_size_env) : 1;
+
+	int in_size = (is_mmcp ? (5 * 512) : 18) * batch_size;
+	int out_size = (is_mmcp ? (2 * 512) : 1) * batch_size;
 
 	float* flat_data = new float[in_size];
 	if (!is_mmcp) {
-		for (int i = 0; i < 9; ++i) {
-			flat_data[i] = (4 + i * 17) % 100; // First 9 values (water)
-		}
-		for (int i = 0; i < 9; ++i) {
-			flat_data[9 + i] = (7 + i * 24) % 200; // Next 9 values (terrain)
+		for (int b = 0; b < batch_size; ++b) {
+			int offset = b * 18;
+			for (int i = 0; i < 9; ++i) {
+				flat_data[offset + i] = (4 + i * 17) % 100; // First 9 values (water)
+			}
+			for (int i = 0; i < 9; ++i) {
+				flat_data[offset + 9 + i] = (7 + i * 24) % 200; // Next 9 values (terrain)
+			}
 		}
 	} else {
 		for (int i = 0; i < in_size; ++i) {
@@ -99,7 +107,7 @@ int main(int argc, char** argv)
 		flat_data[i] *= world_rank;
 	}
 
-	std::vector<int> single_shape = is_mmcp ? std::vector<int>{1, 5, 512} : std::vector<int>{1, 18};
+	std::vector<int> single_shape = is_mmcp ? std::vector<int>{batch_size, 5, 512} : std::vector<int>{batch_size, 18};
 	MLCouplingTensor<float> input_tensor = MLCouplingTensor<float>::wrap_flat(
 		flat_data,
 		single_shape,
@@ -118,9 +126,11 @@ int main(int argc, char** argv)
     float* output_buffer = new float[out_size];
 
 	// Just to ensure the buffer is changed, we set it to -1 initially
-	output_buffer[0] = -1;
+	for (int i = 0; i < out_size; ++i) {
+		output_buffer[i] = -1.0f;
+	}
 
-	std::vector<int> out_shape = is_mmcp ? std::vector<int>{1, 2, 512} : std::vector<int>{1};
+	std::vector<int> out_shape = is_mmcp ? std::vector<int>{batch_size, 2, 512} : std::vector<int>{batch_size};
     output_data.add_tensor(MLCouplingTensor<float>::wrap_flat(
 		output_buffer,
 		out_shape,
@@ -192,6 +202,17 @@ int main(int argc, char** argv)
 		std::cout << "Using API_MODE=" << api_mode << "\n";
 	}
 
+	const char* timing_log_env = std::getenv("TIMING_LOG");
+	bool enable_timing = (timing_log_env != nullptr && std::string(timing_log_env) != "0");
+	std::string timing_file = enable_timing ? std::string(timing_log_env) + "_rank_" + std::to_string(world_rank) + ".csv" : "";
+	
+	if (enable_timing) {
+		std::ofstream ofs(timing_file, std::ios_base::trunc);
+		if (ofs.is_open()) {
+			ofs << "Rank,Step,StartTime_ns,EndTime_ns,Duration_us\n";
+		}
+	}
+
 	float* outputs = new float[num_steps];
 
 	for (int step = 0; step < num_steps; ++step) {
@@ -202,6 +223,9 @@ int main(int argc, char** argv)
 		for (size_t i = 0; i < in_size; ++i) {
 			flat_data[i] += step;
 		}
+
+		auto t_start = std::chrono::high_resolution_clock::now();
+
 		try {
 			if (api_mode == "STATIC") {
 				coupling->ml_step();
@@ -223,8 +247,8 @@ int main(int argc, char** argv)
 					.get("output_0", output_data);
 			} else if (api_mode == "ORDERED_MULTI") {
 				int num_inputs = is_mmcp ? 5 : 2;
-				std::vector<int> shape = is_mmcp ? std::vector<int>{1, 512} : std::vector<int>{1, 9};
-				int offset_step = is_mmcp ? 512 : 9;
+				std::vector<int> shape = is_mmcp ? std::vector<int>{batch_size, 512} : std::vector<int>{batch_size, 9};
+				int offset_step = (is_mmcp ? 512 : 9) * batch_size;
 				
 				auto proxy = coupling->ordered();
 				for (int i = 0; i < num_inputs; ++i) {
@@ -236,8 +260,8 @@ int main(int argc, char** argv)
 				proxy.inference().get(output_data);
 			} else if (api_mode == "KEYED_MULTI") {
 				int num_inputs = is_mmcp ? 5 : 2;
-				std::vector<int> shape = is_mmcp ? std::vector<int>{1, 512} : std::vector<int>{1, 9};
-				int offset_step = is_mmcp ? 512 : 9;
+				std::vector<int> shape = is_mmcp ? std::vector<int>{batch_size, 512} : std::vector<int>{batch_size, 9};
+				int offset_step = (is_mmcp ? 512 : 9) * batch_size;
 				
 				auto proxy = coupling->keyed();
 				std::vector<std::string> keys;
@@ -253,6 +277,19 @@ int main(int argc, char** argv)
 			} else {
 				throw std::runtime_error("Unknown API_MODE: " + api_mode);
 			}
+
+			if (enable_timing) {
+				auto t_end = std::chrono::high_resolution_clock::now();
+				auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+				std::ofstream ofs(timing_file, std::ios_base::app);
+				if (ofs.is_open()) {
+					ofs << world_rank << "," << step << ","
+					    << std::chrono::duration_cast<std::chrono::nanoseconds>(t_start.time_since_epoch()).count() << ","
+					    << std::chrono::duration_cast<std::chrono::nanoseconds>(t_end.time_since_epoch()).count() << ","
+					    << duration_us << "\n";
+				}
+			}
+
 		} catch (const std::exception& e) {
 			if (world_rank == 0) std::cerr << "Inference failed at step " << step << " (API_MODE=" << api_mode << "): " << e.what() << "\n";
 			delete coupling;
