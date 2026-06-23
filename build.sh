@@ -18,4 +18,6 @@ cmake -S "${SCRIPT_DIR}" -B "${SCRIPT_DIR}/build" \
       -DSMARTSIM_PYTHON="${SMARTSIM_PYTHON}" \
       -DTORCH_CUDA_ARCH_LIST="9.0"
 
-cmake --build "${SCRIPT_DIR}/build" -j 4
+build_jobs="${SLURM_CPUS_ON_NODE:-4}"
+echo "Building with -j${build_jobs} parallel jobs..."
+cmake --build "${SCRIPT_DIR}/build" -j ${build_jobs}
