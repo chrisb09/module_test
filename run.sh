@@ -9,6 +9,7 @@ STEPS=${STEPS:-1}
 CLIENTS=${CLIENTS:-1}
 COMPILE=${COMPILE:-0}
 MODEL=${MODEL:-"giant"}
+BATCH_SIZE=${BATCH_SIZE:-1}
 
 export PROVIDER
 export STEPS
@@ -16,6 +17,7 @@ export CLIENTS
 export API_MODE
 export MODEL
 export MERGE_STRATEGY
+export BATCH_SIZE
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -155,7 +157,7 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     SSDB="$(tr -d '\n' < "${ENDPOINT_FILE}")"
     echo "Using SSDB=${SSDB}"
 
-    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
+    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
 
     touch "${DONE_FILE}"
     wait "${DRIVER_PID}"
@@ -166,7 +168,7 @@ elif [[ "${PROVIDER}" == "AIX" ]]; then
     if [[ "${DEVICE}" == "GPU" ]]; then
         export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
     fi
-    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
+    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE -n "${CLIENTS}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}"
 
 # 3. PHYDLL Provider
 elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
@@ -198,7 +200,7 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
             fi
     fi
 
-    MPIRUN_ENV=(-x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY)
+    MPIRUN_ENV=(-x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE)
     if [[ "${DEVICE}" == "GPU" ]]; then
         MPIRUN_ENV+=(-x CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0})
         MPIRUN_ENV+=(-x CUDA_DEVICE_ORDER)
@@ -214,5 +216,5 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
 
     # MPMD split: solver uses color=0; DL client uses MPI_UNDEFINED (no MPI_APPNUM reliance).
     echo "Launching PhyDLL with NP_PHY=${NP_PHY}, NP_DL=${NP_DL}, using ${DEVICE}"
-    mpirun "${PHY_APP_ENV[@]}" -n "${NP_PHY}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}" : "${DL_APP_ENV[@]}" -n "${NP_DL}" "${DL_CLIENT_CMD[@]}"
+    mpirun --bind-to none "${PHY_APP_ENV[@]}" -n "${NP_PHY}" "${SCRIPT_DIR}/build/module_test_solver" "${CONFIG_FILE}" : "${DL_APP_ENV[@]}" -n "${NP_DL}" "${DL_CLIENT_CMD[@]}"
 fi
