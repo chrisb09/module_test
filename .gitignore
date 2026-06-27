@@ -38,6 +38,12 @@ myTestTable.md
 tmp/
 core.*
 
+# Slurm build/run logs
+build-*.*.err
+build-*.*.out
+mt-*.*.err
+mt-*.*.out
+
 # Local dev/IDEs
 .vscode/
 .idea/

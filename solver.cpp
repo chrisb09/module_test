@@ -213,7 +213,8 @@ int main(int argc, char** argv)
 		}
 	}
 
-	float* outputs = new float[num_steps];
+	float* outputs_first = new float[num_steps];
+	float* outputs_sum = new float[num_steps];
 
 	for (int step = 0; step < num_steps; ++step) {
 		if (num_steps > 1) {
@@ -302,14 +303,28 @@ int main(int argc, char** argv)
 				std::cout << output_buffer[0];
 			std::cout << "]\n";
 		}
-		outputs[step] = output_buffer[0];
+		outputs_first[step] = output_buffer[0];
+		// Compute checksum of full output
+		float sum = 0;
+		for (int i = 0; i < out_size; ++i) sum += output_buffer[i];
+		outputs_sum[step] = sum;
 	}
 
 	std::cout << "###########################################################################\n";
 
-	std::cout << "All steps completed. Final outputs of rank " << world_rank << ":\n  ";
+	std::cout << "All steps completed. Final outputs of rank " << world_rank << " (out_size=" << out_size << "):\n";
 	for (int step = 0; step < num_steps; ++step) {
-		std::cout << outputs[step] << "  ";
+		std::cout << "  step " << step << ": first=" << std::fixed << std::setprecision(6) << outputs_first[step]
+		          << " sum=" << outputs_sum[step] << "\n";
+	}
+	// Print last step's output: first 5 ... last 5
+	if (out_size > 0) {
+		std::cout << "  Last step output buffer: [";
+		int show = std::min(5, out_size);
+		for (int i = 0; i < show; ++i) std::cout << std::fixed << std::setprecision(4) << output_buffer[i] << " ";
+		if (out_size > 2 * show) std::cout << "... ";
+		for (int i = out_size - show; i < out_size; ++i) std::cout << std::fixed << std::setprecision(4) << output_buffer[i] << " ";
+		std::cout << "]\n";
 	}
 	std::cout << "\n";
 
@@ -318,11 +333,15 @@ int main(int argc, char** argv)
 		int world_size = 0;
 		MPI_Comm_size(local_comm, &world_size);
 		std::vector<float> all_outputs(world_size * num_steps);
-		MPI_Gather(outputs, num_steps, MPI_FLOAT, all_outputs.data(), num_steps, MPI_FLOAT, 0, local_comm);
+		MPI_Gather(outputs_first, num_steps, MPI_FLOAT, all_outputs.data(), num_steps, MPI_FLOAT, 0, local_comm);
+		
+		// Also gather output sums for full-vector comparison
+		std::vector<float> all_sums(world_size * num_steps);
+		MPI_Gather(outputs_sum, num_steps, MPI_FLOAT, all_sums.data(), num_steps, MPI_FLOAT, 0, local_comm);
 		
 		if (world_rank == 0) {
 			std::cout << "\n###########################################################################\n";
-			std::cout << "Gathered outputs from all ranks:\n";
+			std::cout << "Gathered output[0] from all ranks:\n";
 			
 			std::cout << "[";
 			for (int rank = 0; rank < world_size; ++rank) {
@@ -335,10 +354,24 @@ int main(int argc, char** argv)
 				std::cout << "]";
 			}
 			std::cout << "]\n";
+
+			std::cout << "Gathered output sums from all ranks:\n";
+			std::cout << "[";
+			for (int rank = 0; rank < world_size; ++rank) {
+				if (rank > 0) std::cout << ", ";
+				std::cout << "[";
+				for (int step = 0; step < num_steps; ++step) {
+					if (step > 0) std::cout << ", ";
+					std::cout << std::fixed << std::setprecision(4) << all_sums[rank * num_steps + step];
+				}
+				std::cout << "]";
+			}
+			std::cout << "]\n";
 		}
 	}
 
-	delete[] outputs;
+	delete[] outputs_first;
+	delete[] outputs_sum;
 
 	delete coupling;
 

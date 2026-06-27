@@ -63,10 +63,18 @@ if [[ -z "${CONFIG_FILE:-}" ]]; then
             CONFIG_FILE="${SCRIPT_DIR}/config_smartsim_cpu.toml"
         fi
     elif [[ "${PROVIDER}" == "AIX" ]]; then
-        if [[ "${DEVICE}" == "GPU" ]]; then
-            CONFIG_FILE="${SCRIPT_DIR}/config_aix_gpu.toml"
+        if [[ "${API_MODE}" == "STATIC" ]]; then
+            if [[ "${DEVICE}" == "GPU" ]]; then
+                CONFIG_FILE="${SCRIPT_DIR}/config_aix_gpu.toml"
+            else
+                CONFIG_FILE="${SCRIPT_DIR}/config_aix_cpu.toml"
+            fi
         else
-            CONFIG_FILE="${SCRIPT_DIR}/config_aix_cpu.toml"
+            if [[ "${DEVICE}" == "GPU" ]]; then
+                CONFIG_FILE="${SCRIPT_DIR}/config_aix_gpu_flex.toml"
+            else
+                CONFIG_FILE="${SCRIPT_DIR}/config_aix_cpu_flex.toml"
+            fi
         fi
     elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
         if [[ "${DEVICE}" == "GPU" ]]; then
