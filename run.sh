@@ -97,10 +97,20 @@ echo "Config:   $(basename "${CONFIG_FILE}")"
 echo "Python:   ${SMARTSIM_PYTHON}"
 echo "--------------------------"
 
-# Compile if requested
 if [[ "${COMPILE}" -eq 1 ]]; then
+    EXTRA_CMAKE_ARGS=()
+    if [[ "${PROVIDER}" == "PHYDLL" ]]; then
+        EXTRA_CMAKE_ARGS+=("-DWITH_PHYDLL=ON")
+    fi
+    EXTRA_CMAKE_ARGS+=("-DTORCH_VERSION=2.4.0")
+    if [[ "${USE_SCOREP:-}" == "1" ]]; then
+        EXTRA_CMAKE_ARGS+=("-DWITH_SCOREP=ON" "-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DWITH_SCOREP=ON -DBUILD_TESTS=OFF")
+    else
+        EXTRA_CMAKE_ARGS+=("-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DBUILD_TESTS=OFF")
+    fi
     cmake -S "${SCRIPT_DIR}" -B "${SCRIPT_DIR}/build" \
-            -DSMARTSIM_PYTHON="${SMARTSIM_PYTHON}"
+            -DSMARTSIM_PYTHON="${SMARTSIM_PYTHON}" \
+            "${EXTRA_CMAKE_ARGS[@]}"
     cmake --build "${SCRIPT_DIR}/build" -j
 fi
 
