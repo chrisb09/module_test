@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(module_test LANGUAGES CXX)
+project(module_test LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -84,6 +84,16 @@ if(MPI_FOUND)
 endif()
 
 target_compile_definitions(module_test_solver PRIVATE SMARTSIM_ENABLED WITH_SMARTSIM WITH_AIX)
+
+if(WITH_SCOREP)
+    list(APPEND CMAKE_MODULE_PATH "${CPP_MODULE_DIR}/extern/AIxeleratorService/cmake")
+    find_package(Scorep REQUIRED)
+    if(SCOREP_FOUND)
+        scorep_instrument_target(module_test_solver USER ON COMPILER OFF MEMORY ON MPP mpi)
+        target_compile_definitions(module_test_solver PRIVATE USE_SCOREP)
+        target_link_options(module_test_solver PRIVATE -no-pie)
+    endif()
+endif()
 
 
 if(EXISTS "${SMARTREDIS_DIR}/build/Release/libsmartredis.so")

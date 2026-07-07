@@ -229,7 +229,7 @@ int main(int argc, char** argv)
 
 		try {
 			if (api_mode == "STATIC") {
-				coupling->ml_step();
+				coupling->step();
 			} else if (api_mode == "ORDERED") {
 				MLCouplingData<float> current_input{std::vector<MLCouplingTensor<float>>{
 					MLCouplingTensor<float>::wrap_flat(flat_data, single_shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)

@@ -582,6 +582,7 @@ parser.add_argument("--workloads", nargs="+", help="Workloads as 'steps/clients'
 parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 7], help="Batch sizes to test (default: [1, 7])")
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
 parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs/Threads to limit (0 = auto)")
+parser.add_argument("--scorep", choices=["auto", "on", "off"], default="auto", help="Score-P mode: auto lets run.sh infer from build_state.env, on forces USE_SCOREP=1, off forces USE_SCOREP=0")
 
 args = parser.parse_args()
 BATCH_SIZES = args.batch_sizes
@@ -669,6 +670,10 @@ for provider in PROVIDERS:
                             env["BATCH_SIZE"] = str(batch_size)
                             env["COMPILE"] = "0"
                             env["MODEL"] = current_model
+                            if args.scorep == "on":
+                                env["USE_SCOREP"] = "1"
+                            elif args.scorep == "off":
+                                env["USE_SCOREP"] = "0"
                             if "mmcp" in current_model:
                                 env["MERGE_STRATEGY"] = "AUTO"
                             elif provider == "SMARTSIM" and "MULTI" in api_mode:
@@ -697,7 +702,7 @@ for provider in PROVIDERS:
                                 target_gpu = DEFAULT_GPU_ID
 
                             if args.verbose:
-                                relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT"]
+                                relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP"]
                                 env_str = " ".join(f"{k}={env[k]}" for k in relevant_env if k in env)
                                 print(f"\n[Running] {env_str} ./run.sh", flush=True)
 
@@ -710,6 +715,7 @@ for provider in PROVIDERS:
                                 "steps": steps,
                                 "clients": clients,
                                 "batch_size": batch_size,
+                                "scorep": args.scorep,
                             }
                             success, duration, cpu_solver_mb, cpu_ml_mb, cpu_other_mb, cpu_total_mb, gpu_mb, gpu_procs, summary, full_log = run_command(
                                 ["./run.sh"],

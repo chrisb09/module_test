@@ -35,12 +35,6 @@ protected:
         (void)input_data_after_preprocessing;
     }
 
-    MLCouplingData<Out> ml_step(MLCouplingData<In> input_data_after_preprocessing) override
-    {
-        (void)input_data_after_preprocessing;
-        return this->output_data_before_postprocessing;
-    }
-
     MLCouplingData<Out> postprocess(MLCouplingData<Out> output_data_before_postprocessing) override
     {
         return output_data_before_postprocessing;

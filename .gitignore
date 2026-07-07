@@ -1,5 +1,7 @@
 # Build and Binary artifacts
 build/
+build-scorep/
+scorep-*/
 bin/
 *.o
 *.so
