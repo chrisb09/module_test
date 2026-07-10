@@ -1,3 +1,5 @@
+Note: the live `test_matrix.py` output now includes a `ScoreP` column and benchmarks both `off` and `on` modes by default.
+
 | Provider  | DL     | API     | Dev  | Model       | St/Cl/B  | Stat | Time   | CPU_S   | CPU_M   | CPU_O   | CPU_T   | GPU(MB) | GPU_Procs | Results
 |-----------|--------|---------|------|-------------|----------|------|--------|---------|---------|---------|---------|---------|------------|----------------------------------------
 | AIX       | -      | STATIC  | CPU  | perfect     | 1/1/1    | ✅  |  67.9s |   652.3 |     0.0 |   169.7 |   655.3 |     0.0 | - | N/A

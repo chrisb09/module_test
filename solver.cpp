@@ -12,6 +12,8 @@
 
 int main(int argc, char** argv)
 {
+	fprintf(stderr, "[module_test] solver entering main before MPI_Init\n");
+	fflush(stderr);
 	const std::string config_path = (argc > 1) ? argv[1] : "config.toml";
 
 	const char* provider = std::getenv("PROVIDER");
@@ -22,7 +24,11 @@ int main(int argc, char** argv)
 	}
 
 	const std::string provider_name(provider);
+	fprintf(stderr, "[module_test] solver calling MPI_Init\n");
+	fflush(stderr);
 	MPI_Init(&argc, &argv);
+	fprintf(stderr, "[module_test] solver returned from MPI_Init\n");
+	fflush(stderr);
 
 	int world_rank = 0;
 	MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);

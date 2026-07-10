@@ -39,6 +39,10 @@ GPU_RANKS_TO_EXCLUDE = int(os.environ.get("GPU_RANKS_TO_EXCLUDE", "1"))
 
 RESULTS = []
 
+
+def _safe_token(value):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value))
+
 class ResourceMonitor:
     def __init__(self, target_gpu=None, run_id=None, run_meta=None, log_dir=None):
         self.target_gpu = target_gpu
@@ -437,6 +441,20 @@ class ResourceMonitor:
 def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
     run_id = f"{int(time.time() * 1000)}_{os.getpid()}"
     env["MODULE_TEST_RUN_ID"] = run_id
+    if env.get("USE_SCOREP") == "1":
+        scorep_name_parts = [
+            run_meta.get("provider", "unknown") if run_meta else "unknown",
+            run_meta.get("dl_mode", "-") if run_meta else "-",
+            run_meta.get("api_mode", "-") if run_meta else "-",
+            run_meta.get("device", "unknown") if run_meta else "unknown",
+            run_meta.get("model", "unknown") if run_meta else "unknown",
+            f"{run_meta.get('steps', '0')}_{run_meta.get('clients', '0')}_{run_meta.get('batch_size', '0')}" if run_meta else "0_0_0",
+            run_meta.get("scorep", "on") if run_meta else "on",
+            run_id,
+        ]
+        env["SCOREP_EXPERIMENT_DIRECTORY"] = str(MODULE_TEST_DIR / "scorep" / "_".join(_safe_token(part) for part in scorep_name_parts))
+        env["SCOREP_OVERWRITE_EXPERIMENT_DIRECTORY"] = "true"
+        env["SCOREP_MPP"] = "none"
     
     # Apply CPU limit if requested
     if args.cpus > 0:
@@ -582,7 +600,7 @@ parser.add_argument("--workloads", nargs="+", help="Workloads as 'steps/clients'
 parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 7], help="Batch sizes to test (default: [1, 7])")
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
 parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs/Threads to limit (0 = auto)")
-parser.add_argument("--scorep", choices=["auto", "on", "off"], default="auto", help="Score-P mode: auto lets run.sh infer from build_state.env, on forces USE_SCOREP=1, off forces USE_SCOREP=0")
+parser.add_argument("--scorep", nargs="+", choices=["on", "off"], default=["off", "on"], help="Score-P modes to benchmark (default: off on)")
 
 args = parser.parse_args()
 BATCH_SIZES = args.batch_sizes
@@ -621,8 +639,8 @@ def emit_progress(done, total, start_ts):
     sys.stdout.flush()
 
 # Header
-emit(f"| {'Provider':<9} | {'DL':<6} | {'API':<7} | {'Dev':<4} | {'Model':<11} | {'St/Cl/B':<8} | {'Stat':<2} | {'Time':<6} | {'CPU_S':<7} | {'CPU_M':<7} | {'CPU_O':<7} | {'CPU_T':<7} | {'GPU(MB)':<7} | {'GPU_Procs'} | {'Results'}")
-emit(f"|{'-'*11}|{'-'*8}|{'-'*9}|{'-'*6}|{'-'*13}|{'-'*10}|{'-'*6}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*40}")
+emit(f"| {'Provider':<9} | {'DL':<6} | {'ScoreP':<6} | {'API':<7} | {'Dev':<4} | {'Model':<11} | {'St/Cl/B':<8} | {'Stat':<2} | {'Time':<6} | {'CPU_S':<7} | {'CPU_M':<7} | {'CPU_O':<7} | {'CPU_T':<7} | {'GPU(MB)':<7} | {'GPU_Procs'} | {'Results'}")
+emit(f"|{'-'*11}|{'-'*8}|{'-'*8}|{'-'*9}|{'-'*6}|{'-'*13}|{'-'*10}|{'-'*6}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*40}")
 
 ss_port = 7200
 total_tests = 0
@@ -634,7 +652,7 @@ for provider in PROVIDERS:
                 # mmcp_transformer only makes sense in MULTI modes for this test
                 if model == "mmcp_transformer" and "MULTI" not in api_mode:
                     continue
-                total_tests += dl_count * len(WORKLOADS) * len(BATCH_SIZES)
+                total_tests += dl_count * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
 
 done_tests = 0
 start_ts = time.time()
@@ -644,123 +662,126 @@ for provider in PROVIDERS:
         for model in MODELS:
             dl_modes = PHYDLL_DL_MODES if provider == "PHYDLL" else ["-"]
             for dl_mode in dl_modes:
-                for api_mode in API_MODES:
-                    # mmcp_transformer only makes sense in MULTI modes for this test
-                    if model == "mmcp_transformer" and "MULTI" not in api_mode:
-                        continue
+                for scorep_mode in args.scorep:
+                    for api_mode in API_MODES:
+                        # mmcp_transformer only makes sense in MULTI modes for this test
+                        if model == "mmcp_transformer" and "MULTI" not in api_mode:
+                            continue
 
-                    # For SmartSim MULTI, we use the corresponding split_flat model variant (except for mmcp models where we test merge logic)
-                    if provider == "SMARTSIM" and "MULTI" in api_mode and "mmcp" not in model:
-                        current_model = f"{model}_split_flat"
-                    else:
-                        current_model = model
+                        # For SmartSim MULTI, we use the corresponding split_flat model variant (except for mmcp models where we test merge logic)
+                        if provider == "SMARTSIM" and "MULTI" in api_mode and "mmcp" not in model:
+                            current_model = f"{model}_split_flat"
+                        else:
+                            current_model = model
 
-                    for steps, clients in WORKLOADS:
-                        for batch_size in BATCH_SIZES:
-                            config_file_name = None # default logic in run.sh
-                            config_path = MODULE_TEST_DIR / f"config_{provider.lower()}_{device.lower()}.toml"
-                            update_toml(config_path, provider, device, current_model)
+                        for steps, clients in WORKLOADS:
+                            for batch_size in BATCH_SIZES:
+                                config_file_name = None # default logic in run.sh
+                                config_path = MODULE_TEST_DIR / f"config_{provider.lower()}_{device.lower()}.toml"
+                                update_toml(config_path, provider, device, current_model)
 
-                            env = os.environ.copy()
-                            env["PROVIDER"] = provider
-                            env["DEVICE"] = device
-                            env["API_MODE"] = api_mode
-                            env["STEPS"] = str(steps)
-                            env["CLIENTS"] = str(clients)
-                            env["BATCH_SIZE"] = str(batch_size)
-                            env["COMPILE"] = "0"
-                            env["MODEL"] = current_model
-                            if args.scorep == "on":
-                                env["USE_SCOREP"] = "1"
-                            elif args.scorep == "off":
-                                env["USE_SCOREP"] = "0"
-                            if "mmcp" in current_model:
-                                env["MERGE_STRATEGY"] = "AUTO"
-                            elif provider == "SMARTSIM" and "MULTI" in api_mode:
-                                env["MERGE_STRATEGY"] = "NONE"
-                            else:
-                                env["MERGE_STRATEGY"] = "LIST"
-                            if config_file_name:
-                                env["CONFIG_FILE"] = config_file_name
-                            
-                            if provider == "PHYDLL":
-                                env["USE_PYTHON_DL_CLIENT"] = "1" if dl_mode == "python" else "0"
-                            
-                            target_gpu = None
-                            if provider == "SMARTSIM":
-                                num_gpus_val = "1" if device == "GPU" else "0"
-                                first_gpu_val = "0"
-                                env["MLCOUPLING_SMARTSIM_NUM_GPUS"] = num_gpus_val
-                                env["MLCOUPLING_SMARTSIM_FIRST_GPU"] = first_gpu_val
-                                env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
-                                env["SS_PORT"] = str(ss_port)
-                                ss_port += 1
-                                if device == "GPU":
+                                env = os.environ.copy()
+                                env["PROVIDER"] = provider
+                                env["DEVICE"] = device
+                                env["API_MODE"] = api_mode
+                                env["STEPS"] = str(steps)
+                                env["CLIENTS"] = str(clients)
+                                env["BATCH_SIZE"] = str(batch_size)
+                                env["COMPILE"] = "0"
+                                env["MODEL"] = current_model
+                                env["USE_SCOREP"] = "1" if scorep_mode == "on" else "0"
+                                env["SCOREP_MPP"] = "none"
+                                if provider == "PHYDLL":
+                                    env["USE_PYTHON_DL_CLIENT"] = "1" if dl_mode == "python" else "0"
+                                    env["PHYDLL_PY_SCOREP_WRAPPER"] = "1" if (scorep_mode == "on" and dl_mode == "python") else "0"
+                                    env["PHYDLL_REBUILD_DL_CLIENT"] = "0"
+                                    if dl_mode != "python":
+                                        dl_build_dir = MODULE_TEST_DIR.parent / "CPP-ML-Interface" / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
+                                        env["PHYDLL_DL_BUILD_DIR"] = str(dl_build_dir)
+                                if "mmcp" in current_model:
+                                    env["MERGE_STRATEGY"] = "AUTO"
+                                elif provider == "SMARTSIM" and "MULTI" in api_mode:
+                                    env["MERGE_STRATEGY"] = "NONE"
+                                else:
+                                    env["MERGE_STRATEGY"] = "LIST"
+                                if config_file_name:
+                                    env["CONFIG_FILE"] = config_file_name
+                                
+                                target_gpu = None
+                                if provider == "SMARTSIM":
+                                    num_gpus_val = "1" if device == "GPU" else "0"
+                                    first_gpu_val = "0"
+                                    env["MLCOUPLING_SMARTSIM_NUM_GPUS"] = num_gpus_val
+                                    env["MLCOUPLING_SMARTSIM_FIRST_GPU"] = first_gpu_val
+                                    env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
+                                    env["SS_PORT"] = str(ss_port)
+                                    ss_port += 1
+                                    if device == "GPU":
+                                        target_gpu = DEFAULT_GPU_ID
+                                elif device == "GPU":
+                                    env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
                                     target_gpu = DEFAULT_GPU_ID
-                            elif device == "GPU":
-                                env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
-                                target_gpu = DEFAULT_GPU_ID
 
-                            if args.verbose:
-                                relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP"]
-                                env_str = " ".join(f"{k}={env[k]}" for k in relevant_env if k in env)
-                                print(f"\n[Running] {env_str} ./run.sh", flush=True)
+                                if args.verbose:
+                                    relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP", "SCOREP_MPP", "PHYDLL_PY_SCOREP_WRAPPER", "SCOREP_EXPERIMENT_DIRECTORY"]
+                                    env_str = " ".join(f"{k}={env[k]}" for k in relevant_env if k in env)
+                                    print(f"\n[Running] {env_str} ./run.sh", flush=True)
 
-                            run_meta = {
-                                "provider": provider,
-                                "dl_mode": dl_mode,
-                                "api_mode": api_mode,
-                                "device": device,
-                                "model": current_model,
-                                "steps": steps,
-                                "clients": clients,
-                                "batch_size": batch_size,
-                                "scorep": args.scorep,
-                            }
-                            success, duration, cpu_solver_mb, cpu_ml_mb, cpu_other_mb, cpu_total_mb, gpu_mb, gpu_procs, summary, full_log = run_command(
-                                ["./run.sh"],
-                                env,
-                                target_gpu,
-                                run_meta=run_meta,
-                                log_dir=args.log_dir or None,
-                            )
-                            if gpu_procs:
-                                sorted_procs = sorted(gpu_procs.items(), key=lambda item: (-item[1][1], item[1][0]))
-                                gpu_procs_str = "; ".join(
-                                    f"{pid} {name}: {used}MiB" for pid, (name, used) in sorted_procs
+                                run_meta = {
+                                    "provider": provider,
+                                    "dl_mode": dl_mode,
+                                    "api_mode": api_mode,
+                                    "device": device,
+                                    "model": current_model,
+                                    "steps": steps,
+                                    "clients": clients,
+                                    "batch_size": batch_size,
+                                    "scorep": scorep_mode,
+                                }
+                                success, duration, cpu_solver_mb, cpu_ml_mb, cpu_other_mb, cpu_total_mb, gpu_mb, gpu_procs, summary, full_log = run_command(
+                                    ["./run.sh"],
+                                    env,
+                                    target_gpu,
+                                    run_meta=run_meta,
+                                    log_dir=args.log_dir or None,
                                 )
-                            else:
-                                gpu_procs_str = "-"
-                            
-                            status = "✅" if success else "❌"
-                            st_cl_b = f"{steps}/{clients}/{batch_size}"
-                            emit(
-                                f"| {provider:<9} | {dl_mode:<6} | {api_mode:<7} | {device:<4} | {current_model:<11} | {st_cl_b:<8} | {status:<2} | {duration:>5.1f}s | "
-                                f"{cpu_solver_mb:>7.1f} | {cpu_ml_mb:>7.1f} | {cpu_other_mb:>7.1f} | {cpu_total_mb:>7.1f} | {gpu_mb:>7.1f} | {gpu_procs_str} | {summary}"
-                            )
-                            
-                            RESULTS.append({
-                                "provider": provider,
-                                "dl_mode": dl_mode,
-                                "api_mode": api_mode,
-                                "device": device,
-                                "model": current_model,
-                                "steps": steps,
-                                "clients": clients,
-                                "batch_size": batch_size,
-                                "success": success,
-                                "duration": duration,
-                                "cpu_solver_mb": cpu_solver_mb,
-                                "cpu_ml_mb": cpu_ml_mb,
-                                "cpu_other_mb": cpu_other_mb,
-                                "cpu_total_mb": cpu_total_mb,
-                                "gpu_mb": gpu_mb,
-                                "gpu_procs": gpu_procs_str,
-                                "summary": summary
-                            })
+                                if gpu_procs:
+                                    sorted_procs = sorted(gpu_procs.items(), key=lambda item: (-item[1][1], item[1][0]))
+                                    gpu_procs_str = "; ".join(
+                                        f"{pid} {name}: {used}MiB" for pid, (name, used) in sorted_procs
+                                    )
+                                else:
+                                    gpu_procs_str = "-"
+                                
+                                status = "✅" if success else "❌"
+                                st_cl_b = f"{steps}/{clients}/{batch_size}"
+                                emit(
+                                    f"| {provider:<9} | {dl_mode:<6} | {scorep_mode:<6} | {api_mode:<7} | {device:<4} | {current_model:<11} | {st_cl_b:<8} | {status:<2} | {duration:>5.1f}s | "
+                                    f"{cpu_solver_mb:>7.1f} | {cpu_ml_mb:>7.1f} | {cpu_other_mb:>7.1f} | {cpu_total_mb:>7.1f} | {gpu_mb:>7.1f} | {gpu_procs_str} | {summary}"
+                                )
+                                
+                                RESULTS.append({
+                                    "provider": provider,
+                                    "dl_mode": dl_mode,
+                                    "api_mode": api_mode,
+                                    "device": device,
+                                    "model": current_model,
+                                    "steps": steps,
+                                    "clients": clients,
+                                    "batch_size": batch_size,
+                                    "success": success,
+                                    "duration": duration,
+                                    "cpu_solver_mb": cpu_solver_mb,
+                                    "cpu_ml_mb": cpu_ml_mb,
+                                    "cpu_other_mb": cpu_other_mb,
+                                    "cpu_total_mb": cpu_total_mb,
+                                    "gpu_mb": gpu_mb,
+                                    "gpu_procs": gpu_procs_str,
+                                    "summary": summary
+                                })
 
-                            done_tests += 1
-                            emit_progress(done_tests, total_tests, start_ts)
+                                done_tests += 1
+                                emit_progress(done_tests, total_tests, start_ts)
 
 if done_tests:
     sys.stdout.write("\n")

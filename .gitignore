@@ -1,6 +1,7 @@
 # Build and Binary artifacts
 build/
 build-scorep/
+scorep/
 scorep-*/
 bin/
 *.o
