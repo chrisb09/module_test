@@ -177,6 +177,14 @@ AIXELERATOR_PREBUILT_INSTALL_PREFIX=${AIXELERATOR_INSTALL_PREFIX}
 EOF
 fi
 
+# Score-P Wrapper Configuration
+WRAPPER=()
+SCOREP_MX_FLAGS=()
+if [[ "${USE_SCOREP:-0}" == "1" ]]; then
+    WRAPPER=(bash -c 'export SCOREP_EXPERIMENT_DIRECTORY="${SCOREP_EXPERIMENT_DIRECTORY}_rank_${OMPI_COMM_WORLD_RANK:-${PMIX_RANK:-${SLURM_PROCID:-0}}}"; mkdir -p "$(dirname "${SCOREP_EXPERIMENT_DIRECTORY}")"; exec "$@"' _)
+    SCOREP_MX_FLAGS=(-x SCOREP_EXPERIMENT_DIRECTORY -x USE_SCOREP -x SCOREP_MPP)
+fi
+
 # 1. SMARTSIM Provider
 if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     # Staging runtime libs if they exist
@@ -238,7 +246,7 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     SSDB="$(tr -d '\n' < "${ENDPOINT_FILE}")"
     echo "Using SSDB=${SSDB}"
 
-    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE -n "${CLIENTS}" "${SOLVER_BIN}" "${CONFIG_FILE}"
+    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE "${SCOREP_MX_FLAGS[@]}" -n "${CLIENTS}" "${WRAPPER[@]}" "${SOLVER_BIN}" "${CONFIG_FILE}"
 
     touch "${DONE_FILE}"
     wait "${DRIVER_PID}"
@@ -249,7 +257,7 @@ elif [[ "${PROVIDER}" == "AIX" ]]; then
     if [[ "${DEVICE}" == "GPU" ]]; then
         export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
     fi
-    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE -n "${CLIENTS}" "${SOLVER_BIN}" "${CONFIG_FILE}"
+    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE "${SCOREP_MX_FLAGS[@]}" -n "${CLIENTS}" "${WRAPPER[@]}" "${SOLVER_BIN}" "${CONFIG_FILE}"
 
 # 3. PHYDLL Provider
 elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
@@ -305,7 +313,7 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     MPIRUN_ENV+=(-x USE_SCOREP -x SCOREP_MPP)
     MPIRUN_ENV+=(-x PHYDLL_PY_SCOREP_WRAPPER)
     if [[ "${USE_SCOREP}" == "1" ]]; then
-        MPIRUN_ENV+=(-x SCOREP_ENABLE_PROFILING -x SCOREP_ENABLE_TRACING)
+        MPIRUN_ENV+=(-x SCOREP_ENABLE_PROFILING -x SCOREP_ENABLE_TRACING -x SCOREP_EXPERIMENT_DIRECTORY)
     fi
     if [[ -n "${SCOREP_METRIC_PAPI_SEP:-}" ]]; then
         MPIRUN_ENV+=(-x SCOREP_METRIC_PAPI_SEP)
@@ -336,5 +344,5 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
 
     # MPMD split: solver uses color=0; DL client uses MPI_UNDEFINED (no MPI_APPNUM reliance).
     echo "Launching PhyDLL with NP_PHY=${NP_PHY}, NP_DL=${NP_DL}, using ${DEVICE}"
-    mpirun --bind-to none "${PHY_APP_ENV[@]}" -n "${NP_PHY}" "${SOLVER_BIN}" "${CONFIG_FILE}" : "${DL_APP_ENV[@]}" -n "${NP_DL}" "${DL_CLIENT_CMD[@]}"
+    mpirun --bind-to none "${PHY_APP_ENV[@]}" -n "${NP_PHY}" "${WRAPPER[@]}" "${SOLVER_BIN}" "${CONFIG_FILE}" : "${DL_APP_ENV[@]}" -n "${NP_DL}" "${WRAPPER[@]}" "${DL_CLIENT_CMD[@]}"
 fi
