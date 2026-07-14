@@ -34,7 +34,7 @@ WORKLOADS = [
 
 PHYDLL_DL_MODES = ["cpp", "python"]
 
-DEFAULT_GPU_ID = 3
+DEFAULT_GPU_ID = 1
 GPU_RANKS_TO_EXCLUDE = int(os.environ.get("GPU_RANKS_TO_EXCLUDE", "1"))
 
 RESULTS = []
