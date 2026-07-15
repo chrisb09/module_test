@@ -8,6 +8,7 @@ import signal
 import re
 import json
 import math
+import shlex
 from pathlib import Path
 
 try:
@@ -589,6 +590,26 @@ def update_toml(toml_path, provider, device, model_name):
     with open(toml_path, "w") as f:
         f.write(content)
 
+def prepare_phydll_dl_client(scorep_mode):
+    cmi_dir = MODULE_TEST_DIR.parent / "CPP-ML-Interface"
+    build_dir = cmi_dir / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
+    cmake_args = ["cmake", "-S", str(cmi_dir / "dl_clients"), "-B", str(build_dir)]
+    if scorep_mode == "on":
+        cmake_args += ["-DWITH_SCOREP=ON", "-DCPPML_SCOREP_MPP=none"]
+    else:
+        cmake_args += ["-DWITH_SCOREP=OFF"]
+
+    print(f"[Preparing] PhyDLL C++ client ({scorep_mode}): {build_dir}", flush=True)
+    setup = (
+        f"export USE_SCOREP={'1' if scorep_mode == 'on' else '0'} SCOREP_MPP=none; "
+        f"source {shlex.quote(str(MODULE_TEST_DIR.parent / 'set_env_claix23_cuda12.4.sh'))}; "
+    )
+    if subprocess.run(["bash", "-lc", setup + shlex.join(cmake_args)], cwd=MODULE_TEST_DIR).returncode != 0:
+        raise RuntimeError(f"Failed to configure PhyDLL C++ client ({scorep_mode})")
+    build_args = ["cmake", "--build", str(build_dir), "-j"]
+    if subprocess.run(["bash", "-lc", setup + shlex.join(build_args)], cwd=MODULE_TEST_DIR).returncode != 0:
+        raise RuntimeError(f"Failed to build PhyDLL C++ client ({scorep_mode})")
+
 parser = argparse.ArgumentParser(description="Run module_test matrix and write a markdown table.")
 parser.add_argument("--out", dest="out_path", default="", help="Optional output file path for the table")
 parser.add_argument("--log-dir", dest="log_dir", default="", help="Optional directory for memory tree logs")
@@ -619,6 +640,10 @@ if args.workloads:
             WORKLOADS.append((s, c))
         except ValueError:
             print(f"Ignoring invalid workload format: {wl}")
+
+if "PHYDLL" in PROVIDERS:
+    for scorep_mode in args.scorep:
+        prepare_phydll_dl_client(scorep_mode)
 
 out_f = open(args.out_path, "w", encoding="utf-8") if args.out_path else None
 
