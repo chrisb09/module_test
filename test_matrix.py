@@ -522,23 +522,52 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
             monitor.stop()
 
         # Improved summary extraction: find numeric output ranks
-        result_values = None
-        
-        found_header = False
-        for line in output.splitlines():
-            line = line.strip()
-            if "Gathered outputs from all ranks:" in line:
-                found_header = True
-                continue
-            if found_header:
-                if line.startswith("[[") and line.endswith("]]"):
-                    try:
-                        result_values = json.loads(line)
-                        break
-                    except:
-                        pass
-        
-        result_summary = json.dumps(result_values) if result_values is not None else "N/A"
+        outputs_first_vals = None
+        outputs_sum_vals = None
+        legacy_vals = None
+
+        lines = output.splitlines()
+        for i, line in enumerate(lines):
+            line_str = line.strip()
+            if "Gathered output[0] from all ranks:" in line_str:
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    candidate = lines[j].strip()
+                    if candidate.startswith("[[") and candidate.endswith("]]"):
+                        try:
+                            outputs_first_vals = json.loads(candidate)
+                            break
+                        except Exception:
+                            pass
+            elif "Gathered output sums from all ranks:" in line_str:
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    candidate = lines[j].strip()
+                    if candidate.startswith("[[") and candidate.endswith("]]"):
+                        try:
+                            outputs_sum_vals = json.loads(candidate)
+                            break
+                        except Exception:
+                            pass
+            elif "Gathered outputs from all ranks:" in line_str:
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    candidate = lines[j].strip()
+                    if candidate.startswith("[[") and candidate.endswith("]]"):
+                        try:
+                            legacy_vals = json.loads(candidate)
+                            break
+                        except Exception:
+                            pass
+
+        if outputs_first_vals is not None or outputs_sum_vals is not None:
+            res_obj = {}
+            if outputs_first_vals is not None:
+                res_obj["first"] = outputs_first_vals
+            if outputs_sum_vals is not None:
+                res_obj["sum"] = outputs_sum_vals
+            result_summary = json.dumps(res_obj)
+        elif legacy_vals is not None:
+            result_summary = json.dumps({"first": legacy_vals})
+        else:
+            result_summary = "N/A"
         
         return (
             success,
@@ -622,6 +651,7 @@ parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 7], help="
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
 parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs/Threads to limit (0 = auto)")
 parser.add_argument("--scorep", nargs="+", choices=["on", "off"], default=["off", "on"], help="Score-P modes to benchmark (default: off on)")
+parser.add_argument("--skip-phydll-build", "--skip-compile", "--skip-build", dest="skip_phydll_build", action="store_true", help="Skip initial build/compilation of PhyDLL C++ client")
 
 args = parser.parse_args()
 BATCH_SIZES = args.batch_sizes
@@ -641,14 +671,15 @@ if args.workloads:
         except ValueError:
             print(f"Ignoring invalid workload format: {wl}")
 
-if "PHYDLL" in PROVIDERS:
+if "PHYDLL" in PROVIDERS and not args.skip_phydll_build:
     for scorep_mode in args.scorep:
         prepare_phydll_dl_client(scorep_mode)
 
 out_f = open(args.out_path, "w", encoding="utf-8") if args.out_path else None
 
 def emit(line):
-    print(line, flush=True)
+    sys.stdout.write("\r\033[K" + line + "\n")
+    sys.stdout.flush()
     if out_f:
         out_f.write(line + "\n")
         out_f.flush()
@@ -659,7 +690,7 @@ def emit_progress(done, total, start_ts):
     elapsed = time.time() - start_ts
     rate = elapsed / done
     eta = rate * (total - done)
-    msg = f"\rProgress: {done}/{total} | Elapsed: {elapsed:>6.1f}s | ETA: {eta:>6.1f}s"
+    msg = f"\r\033[KProgress: {done}/{total} | Elapsed: {elapsed:>6.1f}s | ETA: {eta:>6.1f}s"
     sys.stdout.write(msg)
     sys.stdout.flush()
 
@@ -809,7 +840,7 @@ for provider in PROVIDERS:
                                 emit_progress(done_tests, total_tests, start_ts)
 
 if done_tests:
-    sys.stdout.write("\n")
+    sys.stdout.write("\r\033[K")
     sys.stdout.flush()
 
 def compare_results(a_str, b_str, rel_tol=1e-3, abs_tol=1e-3):
@@ -818,18 +849,25 @@ def compare_results(a_str, b_str, rel_tol=1e-3, abs_tol=1e-3):
     try:
         a = json.loads(a_str)
         b = json.loads(b_str)
-        if not isinstance(a, list) or not isinstance(b, list):
-            return False
-        if len(a) != len(b):
-            return False
-        for r_a, r_b in zip(a, b):
-            if len(r_a) != len(r_b):
+
+        def _deep_close(x, y):
+            if type(x) != type(y):
                 return False
-            for v_a, v_b in zip(r_a, r_b):
-                if not math.isclose(v_a, v_b, rel_tol=rel_tol, abs_tol=abs_tol):
+            if isinstance(x, (int, float)):
+                return math.isclose(x, y, rel_tol=rel_tol, abs_tol=abs_tol)
+            elif isinstance(x, list):
+                if len(x) != len(y):
                     return False
-        return True
-    except:
+                return all(_deep_close(i, j) for i, j in zip(x, y))
+            elif isinstance(x, dict):
+                if x.keys() != y.keys():
+                    return False
+                return all(_deep_close(x[k], y[k]) for k in x)
+            else:
+                return x == y
+
+        return _deep_close(a, b)
+    except Exception:
         return False
 
 if RESULTS:
