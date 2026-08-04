@@ -12,7 +12,8 @@ else()
 	message(STATUS "DEBUG environment variable is not set, building in release mode")
 endif()
 
-set(CPP_MODULE_DIR "/hpcwork/ro092286/smartsim/CPP-ML-Interface")
+set(CPP_MODULE_DIR "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface"
+    CACHE PATH "CPP-ML-Interface source directory")
 set(SMARTREDIS_DIR "${CPP_MODULE_DIR}/extern/SmartRedis")
 set(SMARTSIM_PYTHON "${CPP_MODULE_DIR}/extern/python/smartsim_cuda-12/bin/python"
     CACHE FILEPATH "Python interpreter with clang module available")
@@ -30,6 +31,7 @@ set(TEMP_GENERATED_REGISTRY "${CMAKE_CURRENT_BINARY_DIR}/generated_registry.tmp.
 file(GLOB_RECURSE CPP_MODULE_HEADERS
 	"${CPP_MODULE_DIR}/include/application/*.hpp"
 	"${CPP_MODULE_DIR}/include/behavior/*.hpp"
+	"${CPP_MODULE_DIR}/include/library/*.hpp"
 	"${CPP_MODULE_DIR}/include/normalization/*.hpp"
 	"${CPP_MODULE_DIR}/include/provider/*.hpp"
 )
@@ -37,8 +39,9 @@ file(GLOB_RECURSE MODULE_TEST_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp
 set(ALL_HEADERS ${CPP_MODULE_HEADERS} ${MODULE_TEST_HEADERS})
 list(REMOVE_DUPLICATES ALL_HEADERS)
 
-set(BASE_CLASSES "MLCouplingProvider,MLCouplingNormalization,MLCouplingBehavior,MLCouplingApplication")
-set(CLANG_ARGS "-std=c++17 -I${CPP_MODULE_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -I${SMARTREDIS_DIR}/include -I${SMARTREDIS_DIR}/install/include -I${CPP_MODULE_DIR}/build/_deps/tomlplusplus-src/include -xc++")
+set(BASE_CLASSES "MLCouplingLibrary,MLCouplingNormalization,MLCouplingBehavior,MLCouplingApplication")
+set(CPPML_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/cpp-ml-interface-build")
+set(CLANG_ARGS "-std=c++17 -I${CPP_MODULE_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -I${SMARTREDIS_DIR}/include -I${SMARTREDIS_DIR}/install/include -I${CPPML_BUILD_DIR}/_deps/tomlplusplus-src/include -xc++")
 
 add_custom_command(
 	OUTPUT "${GENERATED_REGISTRY}"
@@ -76,7 +79,7 @@ target_include_directories(module_test_solver PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${SMARTREDIS_DIR}/include"
 	"${SMARTREDIS_DIR}/install/include"
-	"${CPP_MODULE_DIR}/build/_deps/tomlplusplus-src/include"
+	"${CPPML_BUILD_DIR}/_deps/tomlplusplus-src/include"
 )
 
 find_package(MPI)

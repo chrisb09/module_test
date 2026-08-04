@@ -9,6 +9,7 @@ import re
 import json
 import math
 import shlex
+import socket
 from pathlib import Path
 
 try:
@@ -20,6 +21,10 @@ except Exception:
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODULE_TEST_DIR = BASE_DIR / "module_test"
 TRAIN_MODELS_DIR = BASE_DIR / "mini_app" / "train_models" / "model_a"
+CMI_DIR = Path(os.environ.get(
+    "CMI_DIR",
+    "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface",
+))
 
 # Configurations
 PROVIDERS = ["AIX", "PHYDLL", "SMARTSIM"]
@@ -43,6 +48,20 @@ RESULTS = []
 
 def _safe_token(value):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value))
+
+
+def _next_free_local_port(start):
+    port = start
+    while port <= 65535:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                port += 1
+                continue
+            return port
+    raise RuntimeError(f"No free localhost port found at or above {start}")
+
 
 class ResourceMonitor:
     def __init__(self, target_gpu=None, run_id=None, run_meta=None, log_dir=None):
@@ -492,13 +511,21 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
             
             # multi-stage kill logic
             kill_start = time.time()
-            # 1. Try SIGTERM
-            os.killpg(pgid, signal.SIGTERM)
-            
+            # 1. Try SIGTERM. The parent must also be reaped; otherwise a
+            # zombie process group can make killpg(..., 0) appear alive.
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
             # 2. Wait and check
             killed_successfully = False
+            escalated = False
             while time.time() - kill_start < 120: # 2 minutes total cleanup window
-                time.sleep(2)
+                if process.poll() is not None:
+                    killed_successfully = True
+                    break
+
                 # Check if anyone in the group is still alive
                 try:
                     # Sending signal 0 doesn't kill but checks if process exists
@@ -508,8 +535,24 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
                     break
                 
                 # If still alive after 10s of SIGTERM, escalate to SIGKILL
-                if time.time() - kill_start > 10:
-                    os.killpg(pgid, signal.SIGKILL)
+                if not escalated and time.time() - kill_start > 10:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        killed_successfully = True
+                        break
+                    escalated = True
+
+                time.sleep(2)
+
+            # Reap the subprocess even when its process group has become a
+            # zombie, then use its state for the final cleanup decision.
+            if not killed_successfully:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                killed_successfully = process.poll() is not None
             
             if not killed_successfully:
                 print(f"FATAL ERROR: Could not terminate process group {pgid} after 2 minutes!")
@@ -613,14 +656,15 @@ def update_toml(toml_path, provider, device, model_name):
             if re.search(pattern, content):
                 content = re.sub(pattern, f'{key} = {val}', content)
             else:
-                # If not found, insert into [provider] section
-                content = content.replace("[provider]", f"[provider]\n{key} = {val}")
+                # If not found, insert into the library section used by the
+                # redesigned CMI configuration.
+                content = content.replace("[library]", f"[library]\n{key} = {val}")
 
     with open(toml_path, "w") as f:
         f.write(content)
 
 def prepare_phydll_dl_client(scorep_mode):
-    cmi_dir = MODULE_TEST_DIR.parent / "CPP-ML-Interface"
+    cmi_dir = CMI_DIR
     build_dir = cmi_dir / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
     cmake_args = ["cmake", "-S", str(cmi_dir / "dl_clients"), "-B", str(build_dir)]
     if scorep_mode == "on":
@@ -752,7 +796,7 @@ for provider in PROVIDERS:
                                     env["PHYDLL_PY_SCOREP_WRAPPER"] = "1" if (scorep_mode == "on" and dl_mode == "python") else "0"
                                     env["PHYDLL_REBUILD_DL_CLIENT"] = "0"
                                     if dl_mode != "python":
-                                        dl_build_dir = MODULE_TEST_DIR.parent / "CPP-ML-Interface" / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
+                                        dl_build_dir = CMI_DIR / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
                                         env["PHYDLL_DL_BUILD_DIR"] = str(dl_build_dir)
                                 if "mmcp" in current_model:
                                     env["MERGE_STRATEGY"] = "AUTO"
@@ -765,6 +809,7 @@ for provider in PROVIDERS:
                                 
                                 target_gpu = None
                                 if provider == "SMARTSIM":
+                                    ss_port = _next_free_local_port(ss_port)
                                     num_gpus_val = "1" if device == "GPU" else "0"
                                     first_gpu_val = "0"
                                     env["MLCOUPLING_SMARTSIM_NUM_GPUS"] = num_gpus_val

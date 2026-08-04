@@ -2,6 +2,9 @@
 build/
 build-scorep/
 build-scorep-none/
+build-artifact/
+build-artifact-scorep/
+build-artifact-scorep-*/
 scorep/
 scorep-*/
 bin/
@@ -53,3 +56,8 @@ mt-*.*.out
 .idea/
 __pycache__/
 *.pyc
+
+# Transient local files
+mini_test*.md
+screenlog.0
+test_matrix_phydll_only.md

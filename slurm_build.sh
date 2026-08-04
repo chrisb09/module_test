@@ -13,7 +13,7 @@ set -euo pipefail
 
 # Get directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CPP_ML_DIR="$(realpath "${SCRIPT_DIR}/../CPP-ML-Interface")"
+CPP_ML_DIR="${CMI_DIR:-/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface}"
 ABS_SCRIPT="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
 # If not already running inside a Slurm job, self-submit via srun

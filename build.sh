@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(realpath "${SCRIPT_DIR}/..")"
+CMI_DIR="${CMI_DIR:-/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface}"
 
 usage() {
     cat <<'EOF'
@@ -35,30 +36,31 @@ done
 if [[ -z "${MODULE_TEST_BUILD_DIR:-}" ]]; then
     if [[ "${USE_SCOREP}" == "1" ]]; then
         if [[ "${SCOREP_MPP}" == "mpi" ]]; then
-            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-scorep"
+            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-artifact-scorep"
         else
-            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-scorep-${SCOREP_MPP}"
+            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-artifact-scorep-${SCOREP_MPP}"
         fi
     else
-        MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build"
+        MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-artifact"
     fi
 fi
 
 if [[ "${USE_SCOREP}" == "1" ]]; then
-      AIXELERATOR_INSTALL_PREFIX="${BASE_DIR}/CPP-ML-Interface/extern/AIxeleratorService/INSTALL-SCOREP"
+      AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
       export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
 else
-      AIXELERATOR_INSTALL_PREFIX="${BASE_DIR}/CPP-ML-Interface/extern/AIxeleratorService/INSTALL"
+      AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
 fi
 
 # Source environment
 source "${BASE_DIR}/set_env_claix23_cuda12.4.sh"
 
 # Use the smartsim_cuda-12 environment by default for building
-SMARTSIM_PYTHON="${BASE_DIR}/CPP-ML-Interface/extern/python/smartsim_cuda-12/bin/python"
+SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-${CMI_DIR}/extern/python/smartsim_cuda-12/bin/python}"
 
 EXTRA_CMAKE_ARGS=(
       -DCMAKE_BUILD_TYPE=Release
+      -DCPP_MODULE_DIR="${CMI_DIR}"
       -DWITH_AIX=ON
       -DWITH_PHYDLL=ON
       -DWITH_SMARTSIM=ON
@@ -69,6 +71,18 @@ EXTRA_CMAKE_ARGS=(
       -DAIXELERATOR_PREBUILT_INSTALL_PREFIX="${AIXELERATOR_INSTALL_PREFIX}"
       -DAIXELERATOR_PREBUILT_LIB_DIR="${AIXELERATOR_INSTALL_PREFIX}/lib"
 )
+
+# The artifact AIXelerator installation requires libstdc++ with GLIBCXX_3.4.32.
+# Keep the default OpenMPI/Clang environment for registry generation, but use
+# GCC 14 for compiling and linking the CMI and fake solver.
+GCC14_ROOT="${GCC14_ROOT:-/cvmfs/software.hpc.rwth.de/Linux/RH9/x86_64/intel/sapphirerapids/software/GCCcore/14.2.0}"
+if [[ -x "${GCC14_ROOT}/bin/gcc" && -x "${GCC14_ROOT}/bin/g++" ]]; then
+      EXTRA_CMAKE_ARGS+=(
+            -DCMAKE_C_COMPILER="${GCC14_ROOT}/bin/gcc"
+            -DCMAKE_CXX_COMPILER="${GCC14_ROOT}/bin/g++"
+            -DCMAKE_EXE_LINKER_FLAGS="-L${GCC14_ROOT}/lib64"
+      )
+fi
 
 if [[ "${USE_SCOREP}" == "1" ]]; then
       EXTRA_CMAKE_ARGS+=(

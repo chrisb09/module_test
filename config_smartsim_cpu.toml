@@ -1,14 +1,14 @@
 [logging]
 level = "debug"
 
-[provider]
+[library]
 num_gpus = 0
 first_gpu = 0
 class = "Smartsim"
 device = "CPU"
 model_backend = "TORCH"
-model_path = "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim/mini_app/train_models/model_a/perfect_cpu.pt"
-model_name = "perfect"
+model_path = "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim/mini_app/train_models/model_a/perfect_split_flat_cpu.pt"
+model_name = "perfect_split_flat"
 nodes = 1
 batch_size = 1
 command_timeout = 900
@@ -28,4 +28,3 @@ class = "Default"
 
 [application]
 class = "ModuleTestApplication"
-

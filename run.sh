@@ -25,7 +25,8 @@ export PHYDLL_PY_SCOREP_WRAPPER
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(realpath "${SCRIPT_DIR}/..")"
-PYTHON_RUNTIME_ROOT="${BASE_DIR}/CPP-ML-Interface/extern/python"
+CMI_DIR="${CMI_DIR:-/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface}"
+PYTHON_RUNTIME_ROOT="${PYTHON_RUNTIME_ROOT:-${CMI_DIR}/extern/python}"
 
 if [[ -n "${MODULE_TEST_BUILD_DIR:-}" ]]; then
     BUILD_STATE_FILE="${MODULE_TEST_BUILD_DIR}/build_state.env"
@@ -54,28 +55,39 @@ export SCOREP_MPP
 if [[ -z "${MODULE_TEST_BUILD_DIR:-}" ]]; then
     if [[ "${USE_SCOREP}" == "1" ]]; then
         if [[ "${SCOREP_MPP}" == "mpi" ]]; then
-            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-scorep"
+            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-artifact-scorep"
         else
-            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-scorep-${SCOREP_MPP}"
+            MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-artifact-scorep-${SCOREP_MPP}"
         fi
     else
-        MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build"
+        MODULE_TEST_BUILD_DIR="${SCRIPT_DIR}/build-artifact"
     fi
 fi
 SOLVER_BIN="${MODULE_TEST_BUILD_DIR}/module_test_solver"
 
 if [[ "${USE_SCOREP}" == "1" ]]; then
-    AIXELERATOR_INSTALL_PREFIX="${BASE_DIR}/CPP-ML-Interface/extern/AIxeleratorService/INSTALL-SCOREP"
+    AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
     SCOREP_BIN_DIR="$(dirname "$(command -v scorep-config)")"
     export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
     export SCOREP_ENABLE_PROFILING=true
     export SCOREP_ENABLE_TRACING=false
 else
-    AIXELERATOR_INSTALL_PREFIX="${BASE_DIR}/CPP-ML-Interface/extern/AIxeleratorService/INSTALL"
+    AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
 fi
 
 # Source environment
 source "${BASE_DIR}/set_env_claix23_cuda12.4.sh"
+
+# The artifact AIXelerator installation requires GCC 14's libstdc++ at
+# runtime. Keep the compiler selection and runtime selection consistent.
+GCC14_ROOT="${GCC14_ROOT:-/cvmfs/software.hpc.rwth.de/Linux/RH9/x86_64/intel/sapphirerapids/software/GCCcore/14.2.0}"
+if [[ -d "${GCC14_ROOT}/lib64" ]]; then
+    export LD_LIBRARY_PATH="${GCC14_ROOT}/lib64:${LD_LIBRARY_PATH:-}"
+fi
+
+# CPU conversion still requires Torch; use the active Torch-capable Python by
+# default rather than the SmartSim CPU runtime, which does not ship Torch.
+CONVERSION_PYTHON="${CONVERSION_PYTHON:-python}"
 
 # Perform model conversion if needed
 if [[ "${DEVICE}" == "CPU" && "${MODEL}" != "multi_input" ]]; then
@@ -83,8 +95,7 @@ if [[ "${DEVICE}" == "CPU" && "${MODEL}" != "multi_input" ]]; then
     MODEL_DST="${BASE_DIR}/mini_app/train_models/model_a/${MODEL}_cpu.pt"
     if [[ -f "${MODEL_SRC}" ]]; then
         echo "Converting ${MODEL_SRC} to CPU model ${MODEL_DST}..."
-        # Use the smartsim_cpu python for conversion
-        "${PYTHON_RUNTIME_ROOT}/smartsim_cpu/bin/python" "${SCRIPT_DIR}/convert_to_cpu.py" "${MODEL_SRC}" "${MODEL_DST}"
+        "${CONVERSION_PYTHON}" "${SCRIPT_DIR}/convert_to_cpu.py" "${MODEL_SRC}" "${MODEL_DST}"
     fi
 fi
 
@@ -101,7 +112,17 @@ else
     RUNTIME_DEVICE="smartsim_cpu"
     USE_GPU=0
 fi
-SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-${PYTHON_RUNTIME_ROOT}/${RUNTIME_DEVICE}/bin/python}"
+if [[ "${USE_PYTHON_DL_CLIENT:-0}" == "1" ]]; then
+    # The Python PhyDLL client imports Torch; the SmartSim CPU runtime does
+    # not include it. Use the active Torch-capable environment instead.
+    SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-$(command -v python)}"
+elif [[ "${PROVIDER}" == "SMARTSIM" ]]; then
+    # The artifact's copied SmartSim environment does not include RedisAI.
+    # Use the installed SmartSim runtime for the controller/database.
+    SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-${BASE_DIR}/python/${RUNTIME_DEVICE}/bin/python}"
+else
+    SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-${PYTHON_RUNTIME_ROOT}/${RUNTIME_DEVICE}/bin/python}"
+fi
 PY_ENV="${PYTHON_RUNTIME_ROOT}/${RUNTIME_DEVICE}"
 
 # Select appropriate config file
@@ -149,6 +170,8 @@ echo "--------------------------"
 
 if [[ "${COMPILE}" -eq 1 ]]; then
     EXTRA_CMAKE_ARGS=()
+    EXTRA_CMAKE_ARGS+=("-DCPP_MODULE_DIR=${CMI_DIR}")
+    EXTRA_CMAKE_ARGS+=("-DCMAKE_EXE_LINKER_FLAGS=-L${GCC14_ROOT}/lib64")
     if [[ "${PROVIDER}" == "PHYDLL" ]]; then
         EXTRA_CMAKE_ARGS+=("-DWITH_PHYDLL=ON")
     fi
@@ -187,6 +210,14 @@ fi
 
 # 1. SMARTSIM Provider
 if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
+    SMARTSIM_RAI_PATH="${RAI_PATH:-${BASE_DIR}/python/${RUNTIME_DEVICE}/lib64/python3.9/site-packages/smartsim/_core/lib/redisai.so}"
+    if [[ ! -f "${SMARTSIM_RAI_PATH}" ]]; then
+        echo "RedisAI module not found: ${SMARTSIM_RAI_PATH}" >&2
+        exit 1
+    fi
+    export RAI_PATH="${SMARTSIM_RAI_PATH}"
+    echo "Using RedisAI module: ${RAI_PATH}"
+
     # Staging runtime libs if they exist
     RUNTIME_EXTRA_LIB_DIR="${PY_ENV}/runtime_libs"
     if [[ -d "${RUNTIME_EXTRA_LIB_DIR}" ]]; then
@@ -205,7 +236,7 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     fi
 
     # Use the generalized controller from CPP-ML-Interface
-    SMARTSIM_CONTROLLER="${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/smartsim_controller.py"
+    SMARTSIM_CONTROLLER="${CMI_DIR}/dl_clients/smartsim_controller.py"
     
     CONTROLLER_ARGS=(
             "--endpoint-file" "${ENDPOINT_FILE}"
@@ -267,20 +298,20 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     if [[ "${USE_PYTHON_DL_CLIENT}" == "1" ]]; then
             if [[ "${USE_SCOREP}" == "1" && "${PHYDLL_PY_SCOREP_WRAPPER}" == "1" ]]; then
                 SCOREP_BIN_DIR="$(dirname "$(command -v scorep-config)")"
-                DL_CLIENT_CMD=("env" "PATH=${SCOREP_BIN_DIR}:${PATH}" "${SMARTSIM_PYTHON}" "-m" "scorep" "--keep-files" "--instrumenter-type=dummy" "--noinstrumenter" "--mpp=${SCOREP_MPP}" "${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/phydll_dl_client.py")
+                DL_CLIENT_CMD=("env" "PATH=${SCOREP_BIN_DIR}:${PATH}" "${SMARTSIM_PYTHON}" "-m" "scorep" "--keep-files" "--instrumenter-type=dummy" "--noinstrumenter" "--mpp=${SCOREP_MPP}" "${CMI_DIR}/dl_clients/phydll_dl_client.py")
             else
-                DL_CLIENT_CMD=("${SMARTSIM_PYTHON}" "${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/phydll_dl_client.py")
+                DL_CLIENT_CMD=("${SMARTSIM_PYTHON}" "${CMI_DIR}/dl_clients/phydll_dl_client.py")
             fi
             PHYDLL_REBUILD_DL_CLIENT=0
     else
             if [[ "${USE_SCOREP}" == "1" ]]; then
                 if [[ "${SCOREP_MPP}" == "mpi" ]]; then
-                    PHYDLL_DL_BUILD_DIR_DEFAULT="${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/build-scorep"
+                    PHYDLL_DL_BUILD_DIR_DEFAULT="${CMI_DIR}/dl_clients/build-scorep"
                 else
-                    PHYDLL_DL_BUILD_DIR_DEFAULT="${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/build-scorep-${SCOREP_MPP}"
+                    PHYDLL_DL_BUILD_DIR_DEFAULT="${CMI_DIR}/dl_clients/build-scorep-${SCOREP_MPP}"
                 fi
             else
-                PHYDLL_DL_BUILD_DIR_DEFAULT="${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients/build-module-test"
+                PHYDLL_DL_BUILD_DIR_DEFAULT="${CMI_DIR}/dl_clients/build-module-test"
             fi
             PHYDLL_DL_BUILD_DIR="${PHYDLL_DL_BUILD_DIR:-${PHYDLL_DL_BUILD_DIR_DEFAULT}}"
             PHYDLL_DL_CLIENT="${PHYDLL_DL_CLIENT:-${PHYDLL_DL_BUILD_DIR}/phydll_dl_client}"
@@ -297,9 +328,9 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     if [[ "${USE_PYTHON_DL_CLIENT}" == "0" ]]; then
             if [[ "${PHYDLL_REBUILD_DL_CLIENT}" == "1" || ! -x "${PHYDLL_DL_CLIENT}" ]]; then
                     if [[ "${USE_SCOREP}" == "1" ]]; then
-                        cmake -S "${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients" -B "${PHYDLL_DL_BUILD_DIR}" -DWITH_SCOREP=ON -DCPPML_SCOREP_MPP="${SCOREP_MPP}"
+                        cmake -S "${CMI_DIR}/dl_clients" -B "${PHYDLL_DL_BUILD_DIR}" -DWITH_SCOREP=ON -DCPPML_SCOREP_MPP="${SCOREP_MPP}"
                     else
-                        cmake -S "${SCRIPT_DIR}/../CPP-ML-Interface/dl_clients" -B "${PHYDLL_DL_BUILD_DIR}" -DWITH_SCOREP=OFF
+                        cmake -S "${CMI_DIR}/dl_clients" -B "${PHYDLL_DL_BUILD_DIR}" -DWITH_SCOREP=OFF
                     fi
                     cmake --build "${PHYDLL_DL_BUILD_DIR}" -j
             fi
@@ -331,12 +362,8 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     DL_APP_ENV=("${MPIRUN_ENV[@]}")
 
     # Add libphydll.so to LD_LIBRARY_PATH for the DL client.
-    # Use the Score-P build tree when running the Score-P PHYDLL configuration.
-    if [[ "${USE_SCOREP}" == "1" ]]; then
-        PHYDLL_LIB_BUILD_DIR_DEFAULT="${SCRIPT_DIR}/../CPP-ML-Interface/extern/phydll/build-SCOREP"
-    else
-        PHYDLL_LIB_BUILD_DIR_DEFAULT="${SCRIPT_DIR}/../CPP-ML-Interface/extern/phydll/build"
-    fi
+    # PhyDLL itself is not built with a separate Score-P tree in this setup.
+    PHYDLL_LIB_BUILD_DIR_DEFAULT="${CMI_DIR}/extern/phydll/build"
     PHYDLL_LIB_BUILD_DIR="${PHYDLL_LIB_BUILD_DIR:-${PHYDLL_LIB_BUILD_DIR_DEFAULT}}"
     PHYDLL_LIB_DIR=$(realpath "${PHYDLL_LIB_BUILD_DIR}/lib")
     PHY_APP_ENV+=(-x LD_LIBRARY_PATH="${PHYDLL_LIB_DIR}:${LD_LIBRARY_PATH:-}")

@@ -1,7 +1,7 @@
 [logging]
 level = "debug"
 
-[provider]
+[library]
 num_gpus = 4
 first_gpu = 3
 class = "Smartsim"

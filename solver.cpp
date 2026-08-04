@@ -8,7 +8,7 @@
 
 #include <iomanip> // formatting stuff
 
-#include "../CPP-ML-Interface/include/ml_coupling.hpp"
+#include "ml_coupling.hpp"
 
 int main(int argc, char** argv)
 {
@@ -160,11 +160,11 @@ int main(int argc, char** argv)
 		actual_model_path = base_dir_str + "/mini_app/train_models/model_a/" + model_name + "_cpu.pt";
 	}
 
-	MLCoupling<float, float>* coupling = MLCoupling<float, float>::create_from_config(config_path, std::move(input_data), output_data,
+	MLCoupling<float, float, float, float>* coupling = MLCoupling<float, float, float, float>::create_from_config(config_path, std::move(input_data), output_data,
 		ConfigCastMode::Strict,
 		ConfigParameterMatchMode::Lenient,
 		ConfigOverrides{
-			{"provider.model_file", actual_model_path}
+			{"library.model_file", actual_model_path}
 		});
 
 	if (coupling == nullptr) {
@@ -385,5 +385,9 @@ int main(int argc, char** argv)
 	delete[] output_buffer;
 	
 	MPI_Finalize();
-	return 0;
+	// AIxeleratorService leaves process-global workers whose static teardown
+	// can hang after MPI_Finalize in this standalone fake solver.
+	std::cout.flush();
+	std::cerr.flush();
+	std::_Exit(0);
 }
