@@ -1643,3 +1643,19 @@
 | SMARTSIM  | -      | on     | KEYED_MULTI | CPU  | perfect_split_flat | 5/1/1    | ✅  | 193.3s |   635.7 |    94.6 |   335.2 |   822.8 |     0.0 | - | {"first": [[0.0, 1.0, 3.0, 6.0, 10.0]], "sum": [[0.0, 1.0, 3.0, 6.0, 10.0]]}
 | SMARTSIM  | -      | on     | KEYED_MULTI | CPU  | perfect_split_flat | 5/1/7    | ✅  | 193.8s |   628.3 |    86.3 |   340.9 |   806.1 |     0.0 | - | {"first": [[0.0, 1.0, 3.0, 6.0, 10.0]], "sum": [[0.0, 7.0, 21.0, 42.0, 70.0]]}
 | SMARTSIM  | -      | on     | KEYED_MULTI | CPU  | perfect_split_flat | 5/2/1    | ❌  | 300.0s |     0.0 |     0.0 |     0.0 |     0.0 |     0.0 | - | TIMEOUT
+| SMARTSIM  | -      | on     | KEYED_MULTI | CPU  | perfect_split_flat | 5/2/7    | ❌  | 300.0s |     0.0 |     0.0 |     0.0 |     0.0 |     0.0 | - | TIMEOUT
+| SMARTSIM  | -      | off    | STATIC  | CPU  | transformer | 1/1/1    | ✅  | 174.4s |   474.7 |    94.8 |   341.2 |   669.7 |     0.0 | - | {"first": [[-0.4175]], "sum": [[-0.4175]]}
+| SMARTSIM  | -      | off    | STATIC  | CPU  | transformer | 1/1/7    | ✅  | 178.9s |   461.5 |    89.4 |   329.0 |   647.2 |     0.0 | - | {"first": [[-0.4175]], "sum": [[-2.9224]]}
+| SMARTSIM  | -      | off    | STATIC  | CPU  | transformer | 5/1/1    | ✅  | 178.4s |   445.1 |    92.1 |   341.3 |   634.1 |     0.0 | - | {"first": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]], "sum": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]]}
+| SMARTSIM  | -      | off    | STATIC  | CPU  | transformer | 5/1/7    | ✅  | 180.3s |   468.0 |    96.1 |   339.9 |   674.4 |     0.0 | - | {"first": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]], "sum": [[-2.9224, 4.7981, 23.0581, 43.6122, 70.5466]]}
+| SMARTSIM  | -      | off    | STATIC  | CPU  | transformer | 5/2/1    | ❌  | 300.0s |     0.0 |     0.0 |     0.0 |     0.0 |     0.0 | - | TIMEOUT
+| SMARTSIM  | -      | off    | STATIC  | CPU  | transformer | 5/2/7    | ❌  | 300.0s |     0.0 |     0.0 |     0.0 |     0.0 |     0.0 | - | TIMEOUT
+| SMARTSIM  | -      | off    | ORDERED | CPU  | transformer | 1/1/1    | ✅  | 123.2s |   478.7 |   103.5 |   341.8 |   692.0 |     0.0 | - | {"first": [[-0.4175]], "sum": [[-0.4175]]}
+| SMARTSIM  | -      | off    | ORDERED | CPU  | transformer | 1/1/7    | ✅  | 179.5s |   441.6 |    85.4 |   329.2 |   631.0 |     0.0 | - | {"first": [[-0.4175]], "sum": [[-2.9224]]}
+| SMARTSIM  | -      | off    | ORDERED | CPU  | transformer | 5/1/1    | ✅  | 156.3s |   463.8 |    89.4 |   337.7 |   655.3 |     0.0 | - | {"first": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]], "sum": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]]}
+| SMARTSIM  | -      | off    | ORDERED | CPU  | transformer | 5/1/7    | ✅  | 148.7s |   465.3 |    95.8 |   328.9 |   663.8 |     0.0 | - | {"first": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]], "sum": [[-2.9224, 4.7981, 23.0581, 43.6122, 70.5466]]}
+| SMARTSIM  | -      | off    | ORDERED | CPU  | transformer | 5/2/1    | ❌  | 300.0s |     0.0 |     0.0 |     0.0 |     0.0 |     0.0 | - | TIMEOUT
+| SMARTSIM  | -      | off    | ORDERED | CPU  | transformer | 5/2/7    | ❌  | 300.0s |     0.0 |     0.0 |     0.0 |     0.0 |     0.0 | - | TIMEOUT
+| SMARTSIM  | -      | off    | KEYED   | CPU  | transformer | 1/1/1    | ✅  | 176.7s |   449.7 |    95.9 |   345.6 |   648.3 |     0.0 | - | {"first": [[-0.4175]], "sum": [[-0.4175]]}
+| SMARTSIM  | -      | off    | KEYED   | CPU  | transformer | 1/1/7    | ✅  | 168.2s |   461.7 |    91.6 |   343.7 |   657.1 |     0.0 | - | {"first": [[-0.4175]], "sum": [[-2.9224]]}
+| SMARTSIM  | -      | off    | KEYED   | CPU  | transformer | 5/1/1    | ✅  | 137.3s |   473.8 |   102.6 |   329.9 |   679.4 |     0.0 | - | {"first": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]], "sum": [[-0.4175, 0.6854, 3.294, 6.2303, 10.0781]]}
