@@ -287,8 +287,10 @@ elif [[ "${PROVIDER}" == "AIX" ]]; then
     # Force visibility for GPU if requested, but respect CUDA_VISIBLE_DEVICES if already set
     if [[ "${DEVICE}" == "GPU" ]]; then
         export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
+    else
+        export CUDA_VISIBLE_DEVICES=""
     fi
-    mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE "${SCOREP_MX_FLAGS[@]}" -n "${CLIENTS}" "${WRAPPER[@]}" "${SOLVER_BIN}" "${CONFIG_FILE}"
+    mpirun -x CUDA_VISIBLE_DEVICES -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE "${SCOREP_MX_FLAGS[@]}" -n "${CLIENTS}" "${WRAPPER[@]}" "${SOLVER_BIN}" "${CONFIG_FILE}"
 
 # 3. PHYDLL Provider
 elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
