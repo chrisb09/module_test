@@ -323,8 +323,12 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     
     NP_PHY=${CLIENTS}
     NP_DL=1
-    PHYDLL_DL_COUNT=1
-    export PHYDLL_DL_COUNT
+    # uniform_chunks splits the per-rank output into dl_count fields (e.g. 1 for
+    # [B,18]->[B], 2 for MMCP [B,5,512]->[B,2,512]); packed always uses 1.
+    # Preserve a caller-provided value; default to 1.
+    PHYDLL_DL_FIELD_COUNT=${PHYDLL_DL_FIELD_COUNT:-${PHYDLL_DL_COUNT:-1}}
+    PHYDLL_DL_COUNT=${PHYDLL_DL_FIELD_COUNT}
+    export PHYDLL_DL_FIELD_COUNT PHYDLL_DL_COUNT
 
     # Rebuild DL client if requested
     if [[ "${USE_PYTHON_DL_CLIENT}" == "0" ]]; then
@@ -359,6 +363,7 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
         MPIRUN_ENV+=(-x CUDA_DEVICE_ORDER)
     fi
     MPIRUN_ENV+=(-x PHYDLL_DL_COUNT)
+    MPIRUN_ENV+=(-x PHYDLL_DL_FIELD_COUNT)
 
     PHY_APP_ENV=("${MPIRUN_ENV[@]}")
     DL_APP_ENV=("${MPIRUN_ENV[@]}")

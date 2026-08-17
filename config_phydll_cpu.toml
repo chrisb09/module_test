@@ -1,4 +1,5 @@
 [library]
+transport_layout = "uniform_chunks"
 class = "Phydll"
 model_file = "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/input/transformer_inference_scripted_fw2.pt"
 backend = "TORCH"

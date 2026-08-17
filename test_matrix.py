@@ -39,6 +39,7 @@ WORKLOADS = [
 ]
 
 PHYDLL_DL_MODES = ["cpp", "python"]
+PHYDLL_TRANSPORT_LAYOUTS = ["packed", "uniform_chunks"]
 
 DEFAULT_GPU_ID = 1
 GPU_RANKS_TO_EXCLUDE = int(os.environ.get("GPU_RANKS_TO_EXCLUDE", "1"))
@@ -465,6 +466,7 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
         scorep_name_parts = [
             run_meta.get("provider", "unknown") if run_meta else "unknown",
             run_meta.get("dl_mode", "-") if run_meta else "-",
+            run_meta.get("layout", "-") if run_meta else "-",
             run_meta.get("api_mode", "-") if run_meta else "-",
             run_meta.get("device", "unknown") if run_meta else "unknown",
             run_meta.get("model", "unknown") if run_meta else "unknown",
@@ -627,7 +629,7 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
     except Exception as e:
         return False, 0, 0, 0, 0, 0, 0, {}, "ERROR", str(e)
 
-def update_toml(toml_path, provider, device, model_name):
+def update_toml(toml_path, provider, device, model_name, transport_layout="packed"):
     suffix = "cuda" if device == "GPU" else "cpu"
     if model_name == "multi_input":
         model_file = MODULE_TEST_DIR / "multi_input_model.pt"
@@ -659,6 +661,14 @@ def update_toml(toml_path, provider, device, model_name):
                 # If not found, insert into the library section used by the
                 # redesigned CMI configuration.
                 content = content.replace("[library]", f"[library]\n{key} = {val}")
+    elif provider == "PHYDLL":
+        # Add/replace transport_layout in the [library] section.
+        pattern = r'transport_layout\s*=.*'
+        replacement = f'transport_layout = "{transport_layout}"'
+        if re.search(pattern, content):
+            content = re.sub(pattern, replacement, content)
+        else:
+            content = content.replace("[library]", f"[library]\n{replacement}")
 
     with open(toml_path, "w") as f:
         f.write(content)
@@ -679,7 +689,10 @@ def prepare_phydll_dl_client(scorep_mode):
     )
     if subprocess.run(["bash", "-lc", setup + shlex.join(cmake_args)], cwd=MODULE_TEST_DIR).returncode != 0:
         raise RuntimeError(f"Failed to configure PhyDLL C++ client ({scorep_mode})")
-    build_args = ["cmake", "--build", str(build_dir), "-j"]
+    # Build only the DL client, not every target in the standalone dl_clients
+    # project (e.g. the phydll_phy_test regression harness, which assumes the
+    # full top-level CMI build context and is not needed by the matrix).
+    build_args = ["cmake", "--build", str(build_dir), "--target", "phydll_dl_client", "-j"]
     if subprocess.run(["bash", "-lc", setup + shlex.join(build_args)], cwd=MODULE_TEST_DIR).returncode != 0:
         raise RuntimeError(f"Failed to build PhyDLL C++ client ({scorep_mode})")
 
@@ -695,6 +708,7 @@ parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 7], help="
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
 parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs/Threads to limit (0 = auto)")
 parser.add_argument("--scorep", nargs="+", choices=["on", "off"], default=["off", "on"], help="Score-P modes to benchmark (default: off on)")
+parser.add_argument("--transport-layouts", nargs="+", default=PHYDLL_TRANSPORT_LAYOUTS, choices=PHYDLL_TRANSPORT_LAYOUTS, help=f"PhyDLL transport layouts to test (default: {PHYDLL_TRANSPORT_LAYOUTS})")
 parser.add_argument("--skip-phydll-build", "--skip-compile", "--skip-build", dest="skip_phydll_build", action="store_true", help="Skip initial build/compilation of PhyDLL C++ client")
 
 args = parser.parse_args()
@@ -739,20 +753,21 @@ def emit_progress(done, total, start_ts):
     sys.stdout.flush()
 
 # Header
-emit(f"| {'Provider':<9} | {'DL':<6} | {'ScoreP':<6} | {'API':<7} | {'Dev':<4} | {'Model':<11} | {'St/Cl/B':<8} | {'Stat':<2} | {'Time':<6} | {'CPU_S':<7} | {'CPU_M':<7} | {'CPU_O':<7} | {'CPU_T':<7} | {'GPU(MB)':<7} | {'GPU_Procs'} | {'Results'}")
-emit(f"|{'-'*11}|{'-'*8}|{'-'*8}|{'-'*9}|{'-'*6}|{'-'*13}|{'-'*10}|{'-'*6}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*40}")
+emit(f"| {'Provider':<9} | {'DL':<6} | {'Layout':<14} | {'ScoreP':<6} | {'API':<7} | {'Dev':<4} | {'Model':<11} | {'St/Cl/B':<8} | {'Stat':<2} | {'Time':<6} | {'CPU_S':<7} | {'CPU_M':<7} | {'CPU_O':<7} | {'CPU_T':<7} | {'GPU(MB)':<7} | {'GPU_Procs'} | {'Results'}")
+emit(f"|{'-'*11}|{'-'*8}|{'-'*16}|{'-'*8}|{'-'*9}|{'-'*6}|{'-'*13}|{'-'*10}|{'-'*6}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*40}")
 
 ss_port = 7200
 total_tests = 0
 for provider in PROVIDERS:
     dl_count = len(PHYDLL_DL_MODES) if provider == "PHYDLL" else 1
+    layout_count = len(args.transport_layouts) if provider == "PHYDLL" else 1
     for device in DEVICES:
         for model in MODELS:
             for api_mode in API_MODES:
                 # mmcp_transformer only makes sense in MULTI modes for this test
                 if model == "mmcp_transformer" and "MULTI" not in api_mode:
                     continue
-                total_tests += dl_count * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
+                total_tests += dl_count * layout_count * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
 
 done_tests = 0
 start_ts = time.time()
@@ -760,8 +775,13 @@ start_ts = time.time()
 for provider in PROVIDERS:
     for device in DEVICES:
         for model in MODELS:
-            dl_modes = PHYDLL_DL_MODES if provider == "PHYDLL" else ["-"]
-            for dl_mode in dl_modes:
+            # Combine the PhyDLL DL implementation and transport layout into a
+            # single axis so we do not nest another loop deep in the body.
+            if provider == "PHYDLL":
+                dl_variants = [(dm, lay) for dm in PHYDLL_DL_MODES for lay in args.transport_layouts]
+            else:
+                dl_variants = [("-", "-")]
+            for dl_mode, layout in dl_variants:
                 for scorep_mode in args.scorep:
                     for api_mode in API_MODES:
                         # mmcp_transformer only makes sense in MULTI modes for this test
@@ -778,7 +798,7 @@ for provider in PROVIDERS:
                             for batch_size in BATCH_SIZES:
                                 config_file_name = None # default logic in run.sh
                                 config_path = MODULE_TEST_DIR / f"config_{provider.lower()}_{device.lower()}.toml"
-                                update_toml(config_path, provider, device, current_model)
+                                update_toml(config_path, provider, device, current_model, transport_layout=layout)
 
                                 env = os.environ.copy()
                                 env["PROVIDER"] = provider
@@ -798,6 +818,14 @@ for provider in PROVIDERS:
                                     if dl_mode != "python":
                                         dl_build_dir = CMI_DIR / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
                                         env["PHYDLL_DL_BUILD_DIR"] = str(dl_build_dir)
+                                    # uniform_chunks splits the per-rank output into dl_count fields.
+                                    # Module-test shapes: [B,18]->[B] => 1 field; MMCP [B,5,512]->[B,2,512] => 2 fields.
+                                    if layout == "uniform_chunks" and "mmcp" in current_model:
+                                        dl_field_count = 2
+                                    else:
+                                        dl_field_count = 1
+                                    env["PHYDLL_DL_FIELD_COUNT"] = str(dl_field_count)
+                                    env["PHYDLL_DL_COUNT"] = str(dl_field_count)
                                 if "mmcp" in current_model:
                                     env["MERGE_STRATEGY"] = "AUTO"
                                 elif provider == "SMARTSIM" and "MULTI" in api_mode:
@@ -824,13 +852,14 @@ for provider in PROVIDERS:
                                     target_gpu = DEFAULT_GPU_ID
 
                                 if args.verbose:
-                                    relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP", "SCOREP_MPP", "PHYDLL_PY_SCOREP_WRAPPER", "SCOREP_EXPERIMENT_DIRECTORY"]
+                                    relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP", "SCOREP_MPP", "PHYDLL_PY_SCOREP_WRAPPER", "PHYDLL_DL_FIELD_COUNT", "SCOREP_EXPERIMENT_DIRECTORY"]
                                     env_str = " ".join(f"{k}={env[k]}" for k in relevant_env if k in env)
                                     print(f"\n[Running] {env_str} ./run.sh", flush=True)
 
                                 run_meta = {
                                     "provider": provider,
                                     "dl_mode": dl_mode,
+                                    "layout": layout,
                                     "api_mode": api_mode,
                                     "device": device,
                                     "model": current_model,
@@ -857,13 +886,14 @@ for provider in PROVIDERS:
                                 status = "✅" if success else "❌"
                                 st_cl_b = f"{steps}/{clients}/{batch_size}"
                                 emit(
-                                    f"| {provider:<9} | {dl_mode:<6} | {scorep_mode:<6} | {api_mode:<7} | {device:<4} | {current_model:<11} | {st_cl_b:<8} | {status:<2} | {duration:>5.1f}s | "
+                                    f"| {provider:<9} | {dl_mode:<6} | {layout:<14} | {scorep_mode:<6} | {api_mode:<7} | {device:<4} | {current_model:<11} | {st_cl_b:<8} | {status:<2} | {duration:>5.1f}s | "
                                     f"{cpu_solver_mb:>7.1f} | {cpu_ml_mb:>7.1f} | {cpu_other_mb:>7.1f} | {cpu_total_mb:>7.1f} | {gpu_mb:>7.1f} | {gpu_procs_str} | {summary}"
                                 )
                                 
                                 RESULTS.append({
                                     "provider": provider,
                                     "dl_mode": dl_mode,
+                                    "layout": layout,
                                     "api_mode": api_mode,
                                     "device": device,
                                     "model": current_model,
@@ -960,7 +990,7 @@ if RESULTS:
             for anon in anomalies:
                 # Format a concise provider/api string
                 p_str = f"{anon['provider']}({anon['dl_mode']})" if anon['provider'] == "PHYDLL" else anon['provider']
-                print(f"    - {p_str:<15} | {anon['api_mode']:<12} | {anon['device']:<4} -> Result: {anon['summary']}")
+                print(f"    - {p_str:<15} | {anon.get('layout','-'):<14} | {anon['api_mode']:<12} | {anon['device']:<4} -> Result: {anon['summary']}")
         else:
             # print(f"Group: Model={model}, Steps={steps}, Clients={clients}, Batch={batch_size} -> ALL CONSISTENT ({len(entries)} runs)")
             pass
