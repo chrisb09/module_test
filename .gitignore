@@ -50,6 +50,12 @@ build-*.*.err
 build-*.*.out
 mt-*.*.err
 mt-*.*.out
+phydll_repro_*.err
+phydll_repro_*.log
+rerun_failures_*.err
+rerun_failures_*.log
+*.err
+*.log
 
 # Local dev/IDEs
 .vscode/
