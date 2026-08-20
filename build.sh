@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(realpath "${SCRIPT_DIR}/..")"
-CMI_DIR="${CMI_DIR:-/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface}"
+CMI_DIR="${CMI_DIR:-${BASE_DIR}/CPP-ML-Interface}"
 
 usage() {
     cat <<'EOF'

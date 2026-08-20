@@ -23,7 +23,7 @@ MODULE_TEST_DIR = BASE_DIR / "module_test"
 TRAIN_MODELS_DIR = BASE_DIR / "mini_app" / "train_models" / "model_a"
 CMI_DIR = Path(os.environ.get(
     "CMI_DIR",
-    "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface",
+    str(BASE_DIR / "CPP-ML-Interface"),
 ))
 
 # Configurations

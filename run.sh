@@ -25,7 +25,7 @@ export PHYDLL_PY_SCOREP_WRAPPER
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(realpath "${SCRIPT_DIR}/..")"
-CMI_DIR="${CMI_DIR:-/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface}"
+CMI_DIR="${CMI_DIR:-${BASE_DIR}/CPP-ML-Interface}"
 PYTHON_RUNTIME_ROOT="${PYTHON_RUNTIME_ROOT:-${CMI_DIR}/extern/python}"
 
 if [[ -n "${MODULE_TEST_BUILD_DIR:-}" ]]; then

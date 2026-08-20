@@ -12,7 +12,7 @@ else()
 	message(STATUS "DEBUG environment variable is not set, building in release mode")
 endif()
 
-set(CPP_MODULE_DIR "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/CPP-ML-Interface"
+set(CPP_MODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../CPP-ML-Interface"
     CACHE PATH "CPP-ML-Interface source directory")
 set(SMARTREDIS_DIR "${CPP_MODULE_DIR}/extern/SmartRedis")
 set(SMARTSIM_PYTHON "${CPP_MODULE_DIR}/extern/python/smartsim_cuda-12/bin/python"
