@@ -31,17 +31,4 @@ public:
               std::move(library_output),
               std::move(coupling_output),
               normalization) {}
-
-protected:
-    MLCouplingData<LibraryInput>
-    preprocess_coupling_input(MLCouplingData<CouplingInput> input_data) override
-    {
-        return input_data;
-    }
-
-    MLCouplingData<CouplingOutput>
-    postprocess_library_output(MLCouplingData<LibraryOutput> output_data_before_postprocessing) override
-    {
-        return output_data_before_postprocessing;
-    }
 };

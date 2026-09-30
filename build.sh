@@ -49,7 +49,7 @@ if [[ "${USE_SCOREP}" == "1" ]]; then
       AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
       export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
 else
-      AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
+      AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL"
 fi
 
 # Source environment
@@ -93,7 +93,7 @@ if [[ "${USE_SCOREP}" == "1" ]]; then
       )
 else
       EXTRA_CMAKE_ARGS+=(
-            "-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DBUILD_TESTS=OFF"
+            "-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DWITH_SCOREP=OFF -DBUILD_TESTS=OFF"
       )
 fi
 

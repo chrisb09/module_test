@@ -67,12 +67,11 @@ SOLVER_BIN="${MODULE_TEST_BUILD_DIR}/module_test_solver"
 
 if [[ "${USE_SCOREP}" == "1" ]]; then
     AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
-    SCOREP_BIN_DIR="$(dirname "$(command -v scorep-config)")"
     export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
     export SCOREP_ENABLE_PROFILING=true
     export SCOREP_ENABLE_TRACING=false
 else
-    AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
+    AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL"
 fi
 
 # Source environment
@@ -114,8 +113,8 @@ else
 fi
 if [[ "${USE_PYTHON_DL_CLIENT:-0}" == "1" ]]; then
     # The Python PhyDLL client imports Torch; the SmartSim CPU runtime does
-    # not include it. Use the active Torch-capable environment instead.
-    SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-$(command -v python)}"
+    # not include it. The CUDA runtime also supports CPU inference.
+    SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-${PYTHON_RUNTIME_ROOT}/smartsim_cuda-12/bin/python}"
 elif [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     # The artifact's copied SmartSim environment does not include RedisAI.
     # Use the installed SmartSim runtime for the controller/database.
@@ -181,7 +180,7 @@ if [[ "${COMPILE}" -eq 1 ]]; then
     if [[ "${USE_SCOREP:-}" == "1" ]]; then
         EXTRA_CMAKE_ARGS+=("-DWITH_SCOREP=ON" "-DCPPML_SCOREP_MPP=${SCOREP_MPP}" "-DMODULE_TEST_SCOREP_MPP=${SCOREP_MPP}" "-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DWITH_SCOREP=ON -DBUILD_TESTS=OFF")
     else
-        EXTRA_CMAKE_ARGS+=("-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DBUILD_TESTS=OFF")
+        EXTRA_CMAKE_ARGS+=("-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DWITH_SCOREP=OFF -DBUILD_TESTS=OFF")
     fi
     cmake -U AIXELERATOR_PREBUILT_LIB -S "${SCRIPT_DIR}" -B "${MODULE_TEST_BUILD_DIR}" \
             -DSMARTSIM_PYTHON="${SMARTSIM_PYTHON}" \
@@ -298,7 +297,15 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     PHYDLL_PY_SCOREP_WRAPPER=${PHYDLL_PY_SCOREP_WRAPPER:-0}
     DL_CLIENT_CMD=()
     if [[ "${USE_PYTHON_DL_CLIENT}" == "1" ]]; then
+            if ! "${SMARTSIM_PYTHON}" -c 'import numpy, torch; from mpi4py import MPI'; then
+                echo "PHYDLL Python dependencies unavailable in ${SMARTSIM_PYTHON}; set SMARTSIM_PYTHON to a Torch/NumPy/mpi4py runtime compatible with mpirun." >&2
+                exit 1
+            fi
             if [[ "${USE_SCOREP}" == "1" && "${PHYDLL_PY_SCOREP_WRAPPER}" == "1" ]]; then
+                if ! "${SMARTSIM_PYTHON}" -c 'import importlib.util; assert importlib.util.find_spec("scorep.__main__") is not None, "Missing runnable Python Score-P wrapper"'; then
+                    echo "PHYDLL Python profiling requires the Score-P wrapper in ${SMARTSIM_PYTHON}." >&2
+                    exit 1
+                fi
                 SCOREP_BIN_DIR="$(dirname "$(command -v scorep-config)")"
                 DL_CLIENT_CMD=("env" "PATH=${SCOREP_BIN_DIR}:${PATH}" "${SMARTSIM_PYTHON}" "-m" "scorep" "--keep-files" "--instrumenter-type=dummy" "--noinstrumenter" "--mpp=${SCOREP_MPP}" "${CMI_DIR}/dl_clients/phydll_dl_client.py")
             else
