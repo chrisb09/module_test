@@ -1,7 +1,7 @@
 [library]
-transport_layout = "uniform_chunks"
+transport_layout = "packed"
 class = "Phydll"
-model_file = "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/input/transformer_inference_scripted_fw2.pt"
+model_file = "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim/mini_app/train_models/model_a/watercnn_cpu.pt"
 backend = "TORCH"
 device = "CPU"
 
