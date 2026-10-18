@@ -108,3 +108,52 @@ endif()
 
 target_link_directories(module_test_solver PRIVATE "${SMARTREDIS_LIB_DIR}")
 target_link_libraries(module_test_solver PRIVATE smartredis)
+
+# --- C and Fortran API solver drivers (module_test matrix) ---
+
+add_executable(module_test_solver_c solver_c.c)
+target_include_directories(module_test_solver_c PRIVATE
+	"${CPP_MODULE_DIR}/include"
+)
+target_link_libraries(module_test_solver_c PRIVATE cpp_ml_interface_library)
+set_target_properties(module_test_solver_c PROPERTIES LINKER_LANGUAGE CXX)
+if(MPI_FOUND)
+	target_link_libraries(module_test_solver_c PRIVATE MPI::MPI_C)
+endif()
+if(WITH_SCOREP AND SCOREP_FOUND)
+	scorep_instrument_target(module_test_solver_c USER ON COMPILER OFF MEMORY ON MPP ${MODULE_TEST_SCOREP_MPP})
+	target_compile_definitions(module_test_solver_c PRIVATE USE_SCOREP)
+	target_link_options(module_test_solver_c PRIVATE -no-pie)
+endif()
+
+include(CheckLanguage)
+check_language(Fortran)
+if(CMAKE_Fortran_COMPILER)
+	enable_language(Fortran)
+	find_package(MPI)
+	if(TARGET cpp_ml_interface_fortran)
+		add_executable(module_test_solver_fortran solver_fortran.f90)
+		target_include_directories(module_test_solver_fortran PRIVATE
+			"${CPP_MODULE_DIR}/include"
+			"${CPPML_BUILD_DIR}/fortran"
+		)
+		target_link_libraries(module_test_solver_fortran PRIVATE
+			cpp_ml_interface_fortran
+			cpp_ml_interface_library
+		)
+		if(TARGET MPI::MPI_Fortran)
+			target_link_libraries(module_test_solver_fortran PRIVATE MPI::MPI_Fortran)
+		endif()
+		set_target_properties(module_test_solver_fortran PROPERTIES LINKER_LANGUAGE CXX)
+		if(WITH_SCOREP AND SCOREP_FOUND)
+			scorep_instrument_target(module_test_solver_fortran USER ON COMPILER OFF MEMORY ON MPP ${MODULE_TEST_SCOREP_MPP})
+			target_compile_definitions(module_test_solver_fortran PRIVATE USE_SCOREP)
+			target_link_options(module_test_solver_fortran PRIVATE -no-pie)
+		endif()
+	endif()
+endif()
+
+add_custom_target(module_test_solvers DEPENDS module_test_solver module_test_solver_c)
+if(TARGET module_test_solver_fortran)
+	add_dependencies(module_test_solvers module_test_solver_fortran)
+endif()

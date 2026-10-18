@@ -1,0 +1,8 @@
+| Provider  | DL     | Layout         | ScoreP | API     | Lang    | Dev  | Model       | St/Cl/B  | Stat | Time   | CPU_S   | CPU_M   | CPU_O   | CPU_T   | GPU(MB) | GPU_Procs | Results
+|-----------|--------|----------------|--------|---------|---------|------|-------------|----------|------|--------|---------|---------|---------|---------|---------|------------|----------------------------------------
+| PHYDLL    | cpp    | packed         | on     | STATIC  | cpp     | CPU  | watercnn    | 1/1/1    | ✅  |  43.4s |   467.9 |   256.3 |   333.9 |   729.2 |     0.0 | - | {"first": [[0.035]], "sum": [[0.035]]}
+| PHYDLL    | cpp    | packed         | on     | STATIC  | c       | CPU  | watercnn    | 1/1/1    | ✅  |  24.3s |   466.5 |   242.5 |   335.7 |   713.8 |     0.0 | - | {"first": [[0.035]], "sum": [[0.035]]}
+| PHYDLL    | cpp    | packed         | on     | STATIC  | fortran | CPU  | watercnn    | 1/1/1    | ✅  |  16.7s |   468.1 |   218.5 |   334.4 |   691.9 |     0.0 | - | {"first": [[0.035]], "sum": [[0.035]]}
+| PHYDLL    | python | packed         | on     | STATIC  | cpp     | CPU  | watercnn    | 1/1/1    | ✅  |  16.6s |   467.8 |   349.4 |   349.1 |   822.6 |     0.0 | - | {"first": [[0.035]], "sum": [[0.035]]}
+| PHYDLL    | python | packed         | on     | STATIC  | c       | CPU  | watercnn    | 1/1/1    | ✅  |  26.7s |   467.5 |   333.5 |   363.3 |   806.2 |     0.0 | - | {"first": [[0.035]], "sum": [[0.035]]}
+| PHYDLL    | python | packed         | on     | STATIC  | fortran | CPU  | watercnn    | 1/1/1    | ✅  |  17.9s |   469.3 |   336.4 |   338.3 |   810.9 |     0.0 | - | {"first": [[0.035]], "sum": [[0.035]]}

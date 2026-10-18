@@ -26,20 +26,21 @@ CMI_DIR = Path(os.environ.get(
     str(BASE_DIR / "CPP-ML-Interface"),
 ))
 
-# Configurations
-PROVIDERS = ["AIX", "PHYDLL", "SMARTSIM"]
-DEVICES = ["CPU", "GPU"]
-MODELS = ["perfect", "transformer", "giant", "watercnn", "mmcp_transformer"]
-MULTI_MODELS = ["multi_input"]
-API_MODES = ["STATIC", "ORDERED", "KEYED", "ORDERED_MULTI", "KEYED_MULTI"]
-WORKLOADS = [
-    (1, 1), # (steps, clients)
-    (5, 1),
-    (5, 2)
-]
+# Configurations shared with the job-based scheduler.
+from matrix_common import (  # noqa: E402
+    API_LANGS_ALL,
+    API_MODES,
+    DEVICES,
+    MODELS,
+    PHYDLL_DL_MODES,
+    PHYDLL_TRANSPORT_LAYOUTS,
+    PROVIDERS,
+    WORKLOADS,
+    compare_results,
+    update_toml,
+)
 
-PHYDLL_DL_MODES = ["cpp", "python"]
-PHYDLL_TRANSPORT_LAYOUTS = ["packed", "uniform_chunks"]
+MULTI_MODELS = ["multi_input"]
 
 DEFAULT_GPU_ID = 1
 GPU_RANKS_TO_EXCLUDE = int(os.environ.get("GPU_RANKS_TO_EXCLUDE", "1"))
@@ -629,50 +630,6 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
     except Exception as e:
         return False, 0, 0, 0, 0, 0, 0, {}, "ERROR", str(e)
 
-def update_toml(toml_path, provider, device, model_name, transport_layout="packed"):
-    suffix = "cuda" if device == "GPU" else "cpu"
-    if model_name == "multi_input":
-        model_file = MODULE_TEST_DIR / "multi_input_model.pt"
-    elif model_name == "mmcp_transformer":
-        model_file = Path("/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/input/transformer_inference_scripted_fw2.pt")
-    else:
-        model_file = TRAIN_MODELS_DIR / f"{model_name}_{suffix}.pt"
-    
-    with open(toml_path, "r") as f:
-        content = f.read()
-    
-    # Robust regex replacements (no line-start anchors to handle indentation/spacing)
-    content = re.sub(r'model_file\s*=.*', f'model_file = "{str(model_file)}"', content)
-    content = re.sub(r'model_path\s*=.*', f'model_path = "{str(model_file)}"', content)
-    content = re.sub(r'model_name\s*=.*', f'model_name = "{model_name}"', content)
-    content = re.sub(r'device\s*=.*', f'device = "{device}"', content)
-    
-    if provider == "SMARTSIM":
-        # Using relative indexing with CUDA_VISIBLE_DEVICES
-        num_gpus_val = "1" if device == "GPU" else "0"
-        first_gpu_val = "0"
-        
-        for key, val in [("num_gpus", num_gpus_val), ("first_gpu", first_gpu_val)]:
-            # Match anywhere in file to be safe
-            pattern = rf'{key}\s*=.*'
-            if re.search(pattern, content):
-                content = re.sub(pattern, f'{key} = {val}', content)
-            else:
-                # If not found, insert into the library section used by the
-                # redesigned CMI configuration.
-                content = content.replace("[library]", f"[library]\n{key} = {val}")
-    elif provider == "PHYDLL":
-        # Add/replace transport_layout in the [library] section.
-        pattern = r'transport_layout\s*=.*'
-        replacement = f'transport_layout = "{transport_layout}"'
-        if re.search(pattern, content):
-            content = re.sub(pattern, replacement, content)
-        else:
-            content = content.replace("[library]", f"[library]\n{replacement}")
-
-    with open(toml_path, "w") as f:
-        f.write(content)
-
 def prepare_phydll_dl_client(scorep_mode):
     cmi_dir = CMI_DIR
     build_dir = cmi_dir / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
@@ -703,6 +660,7 @@ parser.add_argument("--providers", nargs="+", default=PROVIDERS, help=f"Provider
 parser.add_argument("--devices", nargs="+", default=DEVICES, help=f"Devices to test (default: {DEVICES})")
 parser.add_argument("--models", nargs="+", default=MODELS, help=f"Models to test (default: {MODELS})")
 parser.add_argument("--api-modes", nargs="+", default=API_MODES, help=f"API modes to test (default: {API_MODES})")
+parser.add_argument("--api-langs", nargs="+", default=["cpp"], choices=API_LANGS_ALL, help="Solver API languages to test (default: cpp). C/Fortran currently support STATIC only.")
 parser.add_argument("--workloads", nargs="+", help="Workloads as 'steps/clients' (default: all)")
 parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 7], help="Batch sizes to test (default: [1, 7])")
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
@@ -719,6 +677,15 @@ PROVIDERS = [p for p in args.providers if p in PROVIDERS]
 DEVICES = [d for d in args.devices if d in DEVICES]
 MODELS = [m for m in args.models if m in MODELS]
 API_MODES = [a for a in args.api_modes if a in API_MODES]
+API_LANGS = [lang for lang in args.api_langs if lang in API_LANGS_ALL]
+if not API_LANGS:
+    API_LANGS = ["cpp"]
+
+def langs_for_mode(api_mode):
+    # The C and Fortran drivers currently implement the static coupling path.
+    if api_mode == "STATIC":
+        return API_LANGS
+    return [lang for lang in API_LANGS if lang == "cpp"]
 
 if args.workloads:
     WORKLOADS = []
@@ -753,8 +720,8 @@ def emit_progress(done, total, start_ts):
     sys.stdout.flush()
 
 # Header
-emit(f"| {'Provider':<9} | {'DL':<6} | {'Layout':<14} | {'ScoreP':<6} | {'API':<7} | {'Dev':<4} | {'Model':<11} | {'St/Cl/B':<8} | {'Stat':<2} | {'Time':<6} | {'CPU_S':<7} | {'CPU_M':<7} | {'CPU_O':<7} | {'CPU_T':<7} | {'GPU(MB)':<7} | {'GPU_Procs'} | {'Results'}")
-emit(f"|{'-'*11}|{'-'*8}|{'-'*16}|{'-'*8}|{'-'*9}|{'-'*6}|{'-'*13}|{'-'*10}|{'-'*6}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*40}")
+emit(f"| {'Provider':<9} | {'DL':<6} | {'Layout':<14} | {'ScoreP':<6} | {'API':<7} | {'Lang':<7} | {'Dev':<4} | {'Model':<11} | {'St/Cl/B':<8} | {'Stat':<2} | {'Time':<6} | {'CPU_S':<7} | {'CPU_M':<7} | {'CPU_O':<7} | {'CPU_T':<7} | {'GPU(MB)':<7} | {'GPU_Procs'} | {'Results'}")
+emit(f"|{'-'*11}|{'-'*8}|{'-'*16}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*6}|{'-'*13}|{'-'*10}|{'-'*6}|{'-'*8}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*40}")
 
 ss_port = 7200
 total_tests = 0
@@ -767,7 +734,7 @@ for provider in PROVIDERS:
                 # mmcp_transformer only makes sense in MULTI modes for this test
                 if model == "mmcp_transformer" and "MULTI" not in api_mode:
                     continue
-                total_tests += dl_count * layout_count * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
+                total_tests += dl_count * layout_count * len(langs_for_mode(api_mode)) * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
 
 done_tests = 0
 start_ts = time.time()
@@ -794,156 +761,133 @@ for provider in PROVIDERS:
                         else:
                             current_model = model
 
-                        for steps, clients in WORKLOADS:
-                            for batch_size in BATCH_SIZES:
-                                config_file_name = None # default logic in run.sh
-                                config_path = MODULE_TEST_DIR / f"config_{provider.lower()}_{device.lower()}.toml"
-                                update_toml(config_path, provider, device, current_model, transport_layout=layout)
+                        for api_lang in langs_for_mode(api_mode):
+                            for steps, clients in WORKLOADS:
+                                for batch_size in BATCH_SIZES:
+                                    config_file_name = None # default logic in run.sh
+                                    config_path = MODULE_TEST_DIR / f"config_{provider.lower()}_{device.lower()}.toml"
+                                    update_toml(config_path, provider, device, current_model, transport_layout=layout)
 
-                                env = os.environ.copy()
-                                env["PROVIDER"] = provider
-                                env["DEVICE"] = device
-                                env["API_MODE"] = api_mode
-                                env["STEPS"] = str(steps)
-                                env["CLIENTS"] = str(clients)
-                                env["BATCH_SIZE"] = str(batch_size)
-                                env["COMPILE"] = "0"
-                                env["MODEL"] = current_model
-                                env["USE_SCOREP"] = "1" if scorep_mode == "on" else "0"
-                                env["SCOREP_MPP"] = "none"
-                                if provider == "PHYDLL":
-                                    env["USE_PYTHON_DL_CLIENT"] = "1" if dl_mode == "python" else "0"
-                                    env["PHYDLL_PY_SCOREP_WRAPPER"] = "1" if (scorep_mode == "on" and dl_mode == "python") else "0"
-                                    env["PHYDLL_REBUILD_DL_CLIENT"] = "0"
-                                    if dl_mode != "python":
-                                        dl_build_dir = CMI_DIR / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
-                                        env["PHYDLL_DL_BUILD_DIR"] = str(dl_build_dir)
-                                    # uniform_chunks splits the per-rank output into dl_count fields.
-                                    # Module-test shapes: [B,18]->[B] => 1 field; MMCP [B,5,512]->[B,2,512] => 2 fields.
-                                    if layout == "uniform_chunks" and "mmcp" in current_model:
-                                        dl_field_count = 2
+                                    env = os.environ.copy()
+                                    env["PROVIDER"] = provider
+                                    env["DEVICE"] = device
+                                    env["API_MODE"] = api_mode
+                                    env["API_LANG"] = api_lang
+                                    env["STEPS"] = str(steps)
+                                    env["CLIENTS"] = str(clients)
+                                    env["BATCH_SIZE"] = str(batch_size)
+                                    env["COMPILE"] = "0"
+                                    env["MODEL"] = current_model
+                                    env["USE_SCOREP"] = "1" if scorep_mode == "on" else "0"
+                                    env["SCOREP_MPP"] = "none"
+                                    if provider == "PHYDLL":
+                                        env["USE_PYTHON_DL_CLIENT"] = "1" if dl_mode == "python" else "0"
+                                        env["PHYDLL_PY_SCOREP_WRAPPER"] = "1" if (scorep_mode == "on" and dl_mode == "python") else "0"
+                                        env["PHYDLL_REBUILD_DL_CLIENT"] = "0"
+                                        if dl_mode != "python":
+                                            dl_build_dir = CMI_DIR / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
+                                            env["PHYDLL_DL_BUILD_DIR"] = str(dl_build_dir)
+                                        # uniform_chunks splits the per-rank output into dl_count fields.
+                                        # Module-test shapes: [B,18]->[B] => 1 field; MMCP [B,5,512]->[B,2,512] => 2 fields.
+                                        if layout == "uniform_chunks" and "mmcp" in current_model:
+                                            dl_field_count = 2
+                                        else:
+                                            dl_field_count = 1
+                                        env["PHYDLL_DL_FIELD_COUNT"] = str(dl_field_count)
+                                        env["PHYDLL_DL_COUNT"] = str(dl_field_count)
+                                    if "mmcp" in current_model:
+                                        env["MERGE_STRATEGY"] = "AUTO"
+                                    elif provider == "SMARTSIM" and "MULTI" in api_mode:
+                                        env["MERGE_STRATEGY"] = "NONE"
                                     else:
-                                        dl_field_count = 1
-                                    env["PHYDLL_DL_FIELD_COUNT"] = str(dl_field_count)
-                                    env["PHYDLL_DL_COUNT"] = str(dl_field_count)
-                                if "mmcp" in current_model:
-                                    env["MERGE_STRATEGY"] = "AUTO"
-                                elif provider == "SMARTSIM" and "MULTI" in api_mode:
-                                    env["MERGE_STRATEGY"] = "NONE"
-                                else:
-                                    env["MERGE_STRATEGY"] = "LIST"
-                                if config_file_name:
-                                    env["CONFIG_FILE"] = config_file_name
+                                        env["MERGE_STRATEGY"] = "LIST"
+                                    if config_file_name:
+                                        env["CONFIG_FILE"] = config_file_name
                                 
-                                target_gpu = None
-                                if provider == "SMARTSIM":
-                                    ss_port = _next_free_local_port(ss_port)
-                                    num_gpus_val = "1" if device == "GPU" else "0"
-                                    first_gpu_val = "0"
-                                    env["MLCOUPLING_SMARTSIM_NUM_GPUS"] = num_gpus_val
-                                    env["MLCOUPLING_SMARTSIM_FIRST_GPU"] = first_gpu_val
-                                    env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
-                                    env["SS_PORT"] = str(ss_port)
-                                    ss_port += 1
-                                    if device == "GPU":
+                                    target_gpu = None
+                                    if provider == "SMARTSIM":
+                                        ss_port = _next_free_local_port(ss_port)
+                                        num_gpus_val = "1" if device == "GPU" else "0"
+                                        first_gpu_val = "0"
+                                        env["MLCOUPLING_SMARTSIM_NUM_GPUS"] = num_gpus_val
+                                        env["MLCOUPLING_SMARTSIM_FIRST_GPU"] = first_gpu_val
+                                        env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
+                                        env["SS_PORT"] = str(ss_port)
+                                        ss_port += 1
+                                        if device == "GPU":
+                                            target_gpu = DEFAULT_GPU_ID
+                                    elif device == "GPU":
+                                        env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
                                         target_gpu = DEFAULT_GPU_ID
-                                elif device == "GPU":
-                                    env["CUDA_VISIBLE_DEVICES"] = str(DEFAULT_GPU_ID)
-                                    target_gpu = DEFAULT_GPU_ID
 
-                                if args.verbose:
-                                    relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP", "SCOREP_MPP", "PHYDLL_PY_SCOREP_WRAPPER", "PHYDLL_DL_FIELD_COUNT", "SCOREP_EXPERIMENT_DIRECTORY"]
-                                    env_str = " ".join(f"{k}={env[k]}" for k in relevant_env if k in env)
-                                    print(f"\n[Running] {env_str} ./run.sh", flush=True)
+                                    if args.verbose:
+                                        relevant_env = ["PROVIDER", "DEVICE", "API_MODE", "STEPS", "CLIENTS", "BATCH_SIZE", "MODEL", "CONFIG_FILE", "USE_PYTHON_DL_CLIENT", "USE_SCOREP", "SCOREP_MPP", "PHYDLL_PY_SCOREP_WRAPPER", "PHYDLL_DL_FIELD_COUNT", "SCOREP_EXPERIMENT_DIRECTORY"]
+                                        env_str = " ".join(f"{k}={env[k]}" for k in relevant_env if k in env)
+                                        print(f"\n[Running] {env_str} ./run.sh", flush=True)
 
-                                run_meta = {
-                                    "provider": provider,
-                                    "dl_mode": dl_mode,
-                                    "layout": layout,
-                                    "api_mode": api_mode,
-                                    "device": device,
-                                    "model": current_model,
-                                    "steps": steps,
-                                    "clients": clients,
-                                    "batch_size": batch_size,
-                                    "scorep": scorep_mode,
-                                }
-                                success, duration, cpu_solver_mb, cpu_ml_mb, cpu_other_mb, cpu_total_mb, gpu_mb, gpu_procs, summary, full_log = run_command(
-                                    ["./run.sh"],
-                                    env,
-                                    target_gpu,
-                                    run_meta=run_meta,
-                                    log_dir=args.log_dir or None,
-                                )
-                                if gpu_procs:
-                                    sorted_procs = sorted(gpu_procs.items(), key=lambda item: (-item[1][1], item[1][0]))
-                                    gpu_procs_str = "; ".join(
-                                        f"{pid} {name}: {used}MiB" for pid, (name, used) in sorted_procs
+                                    run_meta = {
+                                        "provider": provider,
+                                        "dl_mode": dl_mode,
+                                        "layout": layout,
+                                        "api_mode": api_mode,
+                                        "api_lang": api_lang,
+                                        "device": device,
+                                        "model": current_model,
+                                        "steps": steps,
+                                        "clients": clients,
+                                        "batch_size": batch_size,
+                                        "scorep": scorep_mode,
+                                    }
+                                    success, duration, cpu_solver_mb, cpu_ml_mb, cpu_other_mb, cpu_total_mb, gpu_mb, gpu_procs, summary, full_log = run_command(
+                                        ["./run.sh"],
+                                        env,
+                                        target_gpu,
+                                        run_meta=run_meta,
+                                        log_dir=args.log_dir or None,
                                     )
-                                else:
-                                    gpu_procs_str = "-"
+                                    if gpu_procs:
+                                        sorted_procs = sorted(gpu_procs.items(), key=lambda item: (-item[1][1], item[1][0]))
+                                        gpu_procs_str = "; ".join(
+                                            f"{pid} {name}: {used}MiB" for pid, (name, used) in sorted_procs
+                                        )
+                                    else:
+                                        gpu_procs_str = "-"
                                 
-                                status = "✅" if success else "❌"
-                                st_cl_b = f"{steps}/{clients}/{batch_size}"
-                                emit(
-                                    f"| {provider:<9} | {dl_mode:<6} | {layout:<14} | {scorep_mode:<6} | {api_mode:<7} | {device:<4} | {current_model:<11} | {st_cl_b:<8} | {status:<2} | {duration:>5.1f}s | "
-                                    f"{cpu_solver_mb:>7.1f} | {cpu_ml_mb:>7.1f} | {cpu_other_mb:>7.1f} | {cpu_total_mb:>7.1f} | {gpu_mb:>7.1f} | {gpu_procs_str} | {summary}"
-                                )
+                                    status = "✅" if success else "❌"
+                                    st_cl_b = f"{steps}/{clients}/{batch_size}"
+                                    emit(
+                                        f"| {provider:<9} | {dl_mode:<6} | {layout:<14} | {scorep_mode:<6} | {api_mode:<7} | {api_lang:<7} | {device:<4} | {current_model:<11} | {st_cl_b:<8} | {status:<2} | {duration:>5.1f}s | "
+                                        f"{cpu_solver_mb:>7.1f} | {cpu_ml_mb:>7.1f} | {cpu_other_mb:>7.1f} | {cpu_total_mb:>7.1f} | {gpu_mb:>7.1f} | {gpu_procs_str} | {summary}"
+                                    )
                                 
-                                RESULTS.append({
-                                    "provider": provider,
-                                    "dl_mode": dl_mode,
-                                    "layout": layout,
-                                    "api_mode": api_mode,
-                                    "device": device,
-                                    "model": current_model,
-                                    "steps": steps,
-                                    "clients": clients,
-                                    "batch_size": batch_size,
-                                    "success": success,
-                                    "duration": duration,
-                                    "cpu_solver_mb": cpu_solver_mb,
-                                    "cpu_ml_mb": cpu_ml_mb,
-                                    "cpu_other_mb": cpu_other_mb,
-                                    "cpu_total_mb": cpu_total_mb,
-                                    "gpu_mb": gpu_mb,
-                                    "gpu_procs": gpu_procs_str,
-                                    "summary": summary
-                                })
+                                    RESULTS.append({
+                                        "provider": provider,
+                                        "dl_mode": dl_mode,
+                                        "layout": layout,
+                                        "api_mode": api_mode,
+                                        "api_lang": api_lang,
+                                        "device": device,
+                                        "model": current_model,
+                                        "steps": steps,
+                                        "clients": clients,
+                                        "batch_size": batch_size,
+                                        "success": success,
+                                        "duration": duration,
+                                        "cpu_solver_mb": cpu_solver_mb,
+                                        "cpu_ml_mb": cpu_ml_mb,
+                                        "cpu_other_mb": cpu_other_mb,
+                                        "cpu_total_mb": cpu_total_mb,
+                                        "gpu_mb": gpu_mb,
+                                        "gpu_procs": gpu_procs_str,
+                                        "summary": summary
+                                    })
 
-                                done_tests += 1
-                                emit_progress(done_tests, total_tests, start_ts)
+                                    done_tests += 1
+                                    emit_progress(done_tests, total_tests, start_ts)
 
 if done_tests:
     sys.stdout.write("\r\033[K")
     sys.stdout.flush()
-
-def compare_results(a_str, b_str, rel_tol=1e-3, abs_tol=1e-3):
-    if a_str == b_str:
-        return True
-    try:
-        a = json.loads(a_str)
-        b = json.loads(b_str)
-
-        def _deep_close(x, y):
-            if type(x) != type(y):
-                return False
-            if isinstance(x, (int, float)):
-                return math.isclose(x, y, rel_tol=rel_tol, abs_tol=abs_tol)
-            elif isinstance(x, list):
-                if len(x) != len(y):
-                    return False
-                return all(_deep_close(i, j) for i, j in zip(x, y))
-            elif isinstance(x, dict):
-                if x.keys() != y.keys():
-                    return False
-                return all(_deep_close(x[k], y[k]) for k in x)
-            else:
-                return x == y
-
-        return _deep_close(a, b)
-    except Exception:
-        return False
 
 if RESULTS:
     print("\n" + "="*80)

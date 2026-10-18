@@ -1,5 +1,5 @@
 [library]
-transport_layout = "uniform_chunks"
+transport_layout = "packed"
 class = "Phydll"
 model_file = "/rwthfs/rz/cluster/hpcwork/ro092286/smartsim/mini_app/train_models/model_a/watercnn_cpu.pt"
 backend = "TORCH"

@@ -67,3 +67,9 @@ __pycache__/
 mini_test*.md
 screenlog.0
 test_matrix_phydll_only.md
+
+# Job-based matrix runs
+runs/
+
+# Model conversion locks
+.locks/

@@ -28,6 +28,12 @@ BASE_DIR="$(realpath "${SCRIPT_DIR}/..")"
 CMI_DIR="${CMI_DIR:-${BASE_DIR}/CPP-ML-Interface}"
 PYTHON_RUNTIME_ROOT="${PYTHON_RUNTIME_ROOT:-${CMI_DIR}/extern/python}"
 
+# Job mode isolates per-case state.  Defaults preserve the historical
+# behavior when these variables are unset.
+STATE_DIR="${MODULE_TEST_STATE_DIR:-${SCRIPT_DIR}}"
+SMARTSIM_EXP_DIR="${SMARTSIM_EXP_DIR:-${SCRIPT_DIR}/module_tests}"
+mkdir -p "${STATE_DIR}" "${SMARTSIM_EXP_DIR}"
+
 if [[ -n "${MODULE_TEST_BUILD_DIR:-}" ]]; then
     BUILD_STATE_FILE="${MODULE_TEST_BUILD_DIR}/build_state.env"
 else
@@ -65,6 +71,34 @@ if [[ -z "${MODULE_TEST_BUILD_DIR:-}" ]]; then
 fi
 SOLVER_BIN="${MODULE_TEST_BUILD_DIR}/module_test_solver"
 
+API_LANG="${API_LANG:-cpp}"
+export API_LANG
+case "${API_LANG}" in
+    cpp)
+        SOLVER_BIN="${MODULE_TEST_BUILD_DIR}/module_test_solver"
+        ;;
+    c)
+        SOLVER_BIN="${MODULE_TEST_BUILD_DIR}/module_test_solver_c"
+        ;;
+    fortran)
+        SOLVER_BIN="${MODULE_TEST_BUILD_DIR}/module_test_solver_fortran"
+        ;;
+    *)
+        echo "Unsupported API_LANG: ${API_LANG}" >&2
+        exit 1
+        ;;
+esac
+
+if [[ ! -x "${SOLVER_BIN}" ]]; then
+    echo "Solver binary not found: ${SOLVER_BIN} (API_LANG=${API_LANG}). Run ./build.sh first." >&2
+    exit 1
+fi
+
+if [[ "${API_LANG}" != "cpp" && "${API_MODE}" != "STATIC" ]]; then
+    echo "API_LANG=${API_LANG} currently supports only API_MODE=STATIC (got ${API_MODE})." >&2
+    exit 1
+fi
+
 if [[ "${USE_SCOREP}" == "1" ]]; then
     AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
     export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
@@ -89,12 +123,18 @@ fi
 CONVERSION_PYTHON="${CONVERSION_PYTHON:-python}"
 
 # Perform model conversion if needed
-if [[ "${DEVICE}" == "CPU" && "${MODEL}" != "multi_input" ]]; then
+if [[ "${DEVICE}" == "CPU" && "${MODEL}" != "multi_input" && "${SKIP_MODEL_CONVERSION:-0}" != "1" ]]; then
     MODEL_SRC="${BASE_DIR}/mini_app/train_models/model_a/${MODEL}_cuda.pt"
     MODEL_DST="${BASE_DIR}/mini_app/train_models/model_a/${MODEL}_cpu.pt"
     if [[ -f "${MODEL_SRC}" ]]; then
-        echo "Converting ${MODEL_SRC} to CPU model ${MODEL_DST}..."
-        "${CONVERSION_PYTHON}" "${SCRIPT_DIR}/convert_to_cpu.py" "${MODEL_SRC}" "${MODEL_DST}"
+        # Parallel jobs may hit the same destination; serialize the conversion.
+        LOCK_DIR="${SCRIPT_DIR}/.locks"
+        mkdir -p "${LOCK_DIR}"
+        (
+            flock 9
+            echo "Converting ${MODEL_SRC} to CPU model ${MODEL_DST}..."
+            "${CONVERSION_PYTHON}" "${SCRIPT_DIR}/convert_to_cpu.py" "${MODEL_SRC}" "${MODEL_DST}"
+        ) 9>"${LOCK_DIR}/model_${MODEL}.lock"
     fi
 fi
 
@@ -224,8 +264,8 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
             echo "Using runtime extra libs from ${RUNTIME_EXTRA_LIB_DIR}"
     fi
 
-    ENDPOINT_FILE="${SCRIPT_DIR}/.ssdb_endpoint"
-    DONE_FILE="${SCRIPT_DIR}/.solver_done"
+    ENDPOINT_FILE="${STATE_DIR}/.ssdb_endpoint"
+    DONE_FILE="${STATE_DIR}/.solver_done"
     SS_PORT=${SS_PORT:-6780}
 
     rm -f "${ENDPOINT_FILE}" "${DONE_FILE}"
@@ -241,7 +281,7 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
             "--endpoint-file" "${ENDPOINT_FILE}"
             "--done-file" "${DONE_FILE}"
             "--port" "${SS_PORT}"
-            "--exp-dir" "${SCRIPT_DIR}/module_tests"
+            "--exp-dir" "${SMARTSIM_EXP_DIR}"
     )
 
     if [[ -n "${OMP_NUM_THREADS:-}" ]]; then
