@@ -2,11 +2,14 @@
 build/
 build-scorep/
 build-scorep-none/
+build-scorep-aix-fixed-install/
+build-scorep-dl-fixed/
 build-artifact/
 build-artifact-scorep/
 build-artifact-scorep-*/
 scorep/
 scorep-*/
+scorep_historical.tar
 bin/
 *.o
 *.so
