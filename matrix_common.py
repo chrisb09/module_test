@@ -28,7 +28,7 @@ CMI_DIR = Path(os.environ.get("CMI_DIR", str(BASE_DIR / "CPP-ML-Interface")))
 # ---------------------------------------------------------------------------
 # Axes (order defines the global job ordinal)
 # ---------------------------------------------------------------------------
-MATRIX_VERSION = 1
+MATRIX_VERSION = 2
 
 # Cluster defaults: GPU nodes are 96c/4g, so one GPU is billed as 24 cores.
 DEFAULT_CPU_CORES = 4
@@ -89,7 +89,6 @@ UNIVERSE_SPEC = {
     "api_langs": API_LANGS_ALL,
     "rules": {
         "mmcp_requires_multi": True,
-        "non_static_cpp_only": True,
         "phydll_owns_dl_mode_layout": True,
         "smartsim_multi_split_flat": True,
     },
@@ -110,10 +109,7 @@ def _pick(value, allowed):
 
 
 def langs_for_mode(api_mode, api_langs=None):
-    langs = list(api_langs) if api_langs is not None else list(API_LANGS_ALL)
-    if api_mode == "STATIC":
-        return langs
-    return [lang for lang in langs if lang == "cpp"]
+    return list(api_langs) if api_langs is not None else list(API_LANGS_ALL)
 
 
 def effective_model(provider, model, api_mode):
@@ -308,50 +304,40 @@ def make_job_config(template_path, out_path, case):
 # Output parsing / comparison
 # ---------------------------------------------------------------------------
 def parse_summary(output):
-    outputs_first_vals = None
-    outputs_sum_vals = None
-    legacy_vals = None
+    headers = {
+        "Gathered output[0] from all ranks:": "first",
+        "Gathered output sums from all ranks:": "sum",
+        "Gathered outputs from all ranks:": None,
+    }
+    result = {}
+    section = None
+    for line in output.splitlines():
+        header = next((key for key in headers if key in line), None)
+        if header is not None:
+            section = headers[header]
+            if section is not None:
+                result.pop(section, None)
+            continue
+        candidate = line.strip()
+        if section is None or not candidate.startswith("[["):
+            continue
+        # A matrix-looking line is the section's only candidate, even if malformed.
+        try:
+            values = json.loads(candidate)
+            if (isinstance(values, list) and values
+                    and all(isinstance(row, list) and row for row in values)
+                    and all(len(row) == len(values[0]) for row in values)
+                    and all(type(value) in (int, float) and math.isfinite(value)
+                            for row in values for value in row)):
+                result[section] = values
+        except (ValueError, TypeError, OverflowError):
+            pass
+        section = None
 
-    lines = output.splitlines()
-    for index, line in enumerate(lines):
-        line_str = line.strip()
-        if "Gathered output[0] from all ranks:" in line_str:
-            for candidate_line in lines[index + 1:index + 5]:
-                candidate = candidate_line.strip()
-                if candidate.startswith("[[") and candidate.endswith("]]"):
-                    try:
-                        outputs_first_vals = json.loads(candidate)
-                        break
-                    except Exception:
-                        pass
-        elif "Gathered output sums from all ranks:" in line_str:
-            for candidate_line in lines[index + 1:index + 5]:
-                candidate = candidate_line.strip()
-                if candidate.startswith("[[") and candidate.endswith("]]"):
-                    try:
-                        outputs_sum_vals = json.loads(candidate)
-                        break
-                    except Exception:
-                        pass
-        elif "Gathered outputs from all ranks:" in line_str:
-            for candidate_line in lines[index + 1:index + 5]:
-                candidate = candidate_line.strip()
-                if candidate.startswith("[[") and candidate.endswith("]]"):
-                    try:
-                        legacy_vals = json.loads(candidate)
-                        break
-                    except Exception:
-                        pass
-
-    if outputs_first_vals is not None or outputs_sum_vals is not None:
-        result = {}
-        if outputs_first_vals is not None:
-            result["first"] = outputs_first_vals
-        if outputs_sum_vals is not None:
-            result["sum"] = outputs_sum_vals
+    if ("first" in result and "sum" in result
+            and [len(row) for row in result["first"]]
+            == [len(row) for row in result["sum"]]):
         return json.dumps(result)
-    if legacy_vals is not None:
-        return json.dumps({"first": legacy_vals})
     return "N/A"
 
 
@@ -439,11 +425,12 @@ def prepare_phydll_dl_client(scorep_mode, cmi_dir=None, module_test_dir=None):
     cmi_dir = Path(cmi_dir or CMI_DIR)
     module_test_dir = Path(module_test_dir or MODULE_TEST_DIR)
     build_dir = cmi_dir / "dl_clients" / (
-        "build-scorep-none" if scorep_mode == "on" else "build-module-test"
+        "build-module-test-scorep-none" if scorep_mode == "on" else "build-module-test"
     )
     cmake_args = ["cmake", "-S", str(cmi_dir / "dl_clients"), "-B", str(build_dir)]
     if scorep_mode == "on":
-        cmake_args += ["-DWITH_SCOREP=ON", "-DCPPML_SCOREP_MPP=none"]
+        cmake_args += ["-U", "SCOREP_CONFIG_EXECUTABLE", "-U", "SCOREP_INFO_EXECUTABLE",
+                       "-DWITH_SCOREP=ON", "-DCPPML_SCOREP_MPP=none"]
     else:
         cmake_args += ["-DWITH_SCOREP=OFF"]
 
@@ -452,9 +439,13 @@ def prepare_phydll_dl_client(scorep_mode, cmi_dir=None, module_test_dir=None):
         f"export USE_SCOREP={'1' if scorep_mode == 'on' else '0'} SCOREP_MPP=none; "
         f"source {shlex.quote(str(module_test_dir.parent / 'set_env_claix23_cuda12.4.sh'))}; "
     )
+    if scorep_mode == "on":
+        setup += "unset CC CXX CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER; "
     if subprocess.run(["bash", "-lc", setup + shlex.join(cmake_args)],
                       cwd=module_test_dir).returncode != 0:
-        raise RuntimeError(f"Failed to configure PhyDLL C++ client ({scorep_mode})")
+        hint = (f"; if its CMake cache uses Score-P wrappers, use a fresh build directory: {build_dir}"
+                if scorep_mode == "on" else "")
+        raise RuntimeError(f"Failed to configure PhyDLL C++ client ({scorep_mode}){hint}")
     build_args = ["cmake", "--build", str(build_dir), "--target", "phydll_dl_client", "-j"]
     if subprocess.run(["bash", "-lc", setup + shlex.join(build_args)],
                       cwd=module_test_dir).returncode != 0:
@@ -516,6 +507,8 @@ def cores_for_job(run, device):
 
 
 def run_build_dir(scorep_mode, scorep_mpp="none", module_test_dir=None):
+    if os.environ.get("MODULE_TEST_BUILD_DIR"):
+        return Path(os.environ["MODULE_TEST_BUILD_DIR"])
     root = Path(module_test_dir or MODULE_TEST_DIR)
     if scorep_mode == "on":
         if scorep_mpp and scorep_mpp != "mpi":

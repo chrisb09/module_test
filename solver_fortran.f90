@@ -1,7 +1,7 @@
 ! =============================================================================
 ! Fortran API solver driver for the module_test matrix.
 !
-! Mirrors solver.cpp for API_MODE=STATIC using the Fortran cmi module:
+! Mirrors solver.cpp using the Fortran cmi module:
 !   config file -> create coupling with live buffers + model_file override
 !   -> step -> MPI gather -> print the machine-readable output blocks.
 ! =============================================================================
@@ -23,23 +23,34 @@ program module_test_solver_fortran
   integer :: env_len, env_status
   integer :: is_mmcp, steps, step, rank, step_idx, i, b, offset
   integer :: merge_strategy_value
+  integer :: num_inputs, part_size, part, j
+  logical :: is_ordered, is_keyed, is_multi
 
   real(c_float), allocatable, target :: flat_data(:)
+  real(c_float), allocatable, target :: part_buffers(:, :)
   real(c_float), allocatable, target :: output_buffer(:)
+  real(c_float), pointer :: actual_output(:)
   real(c_float), allocatable :: outputs_first(:), outputs_sum(:)
   real(c_float), allocatable :: all_first(:, :), all_sums(:, :)
   real(c_float) :: checksum
 
   integer(c_int) :: in_dims(3), out_dims(3)
+  integer(c_int) :: part_dims(2)
   integer(c_int) :: st, delta
+  integer(c_int) :: output_dtype, output_layout
+  integer(c_size_t) :: output_numel
   type(cmi_tensor) :: input_tensor, output_tensor
   type(cmi_data) :: input_data, output_data
+  type(cmi_tensor) :: part_tensors(5)
+  type(cmi_data) :: part_data(5)
+  type(c_ptr) :: current_data, input_keys(5), output_keys(1), result_tensor, result_ptr
+  character(kind=c_char), target :: key_storage(10, 5), output_key(9)
   type(cmi_config_overrides) :: overrides
   type(cmi_coupling) :: coupling
 
   interface
      ! Skip static teardown, which can hang for provider runtime workers.
-     subroutine c_exit_now(status) bind(C, name="_exit")
+     subroutine c_exit_now(status) bind(C, name="module_test_exit_now")
        import :: c_int
        integer(c_int), value :: status
      end subroutine c_exit_now
@@ -78,8 +89,11 @@ program module_test_solver_fortran
 
   call get_environment_variable("API_MODE", api_mode)
   if (len_trim(api_mode) == 0) api_mode = "STATIC"
-  if (trim(api_mode) /= "STATIC") then
-     write(*, '(a)') "[module_test_fortran] Fortran solver currently supports only API_MODE=STATIC."
+  is_ordered = trim(api_mode) == "ORDERED" .or. trim(api_mode) == "ORDERED_MULTI"
+  is_keyed = trim(api_mode) == "KEYED" .or. trim(api_mode) == "KEYED_MULTI"
+  is_multi = trim(api_mode) == "ORDERED_MULTI" .or. trim(api_mode) == "KEYED_MULTI"
+  if (trim(api_mode) /= "STATIC" .and. .not. is_ordered .and. .not. is_keyed) then
+     write(*, '(a,a)') "[module_test_fortran] Unknown API_MODE: ", trim(api_mode)
      call MPI_Finalize(ierr)
      stop 1
   end if
@@ -149,6 +163,49 @@ program module_test_solver_fortran
   st = c_cmi_data_add_tensor(output_data%ptr, output_tensor%ptr)
   call require_success(st, "add output tensor")
 
+  num_inputs = 1
+  if (is_multi) then
+     if (is_mmcp == 1) then
+        num_inputs = 5
+        part_dims = [int(batch_size, c_int), 512_c_int]
+     else
+        num_inputs = 2
+        part_dims = [int(batch_size, c_int), 9_c_int]
+     end if
+     part_size = product(part_dims)
+     allocate(part_buffers(part_size, num_inputs))
+     do part = 1, num_inputs
+        st = c_cmi_tensor_create_flat(part_tensors(part)%ptr, c_loc(part_buffers(1, part)), &
+                                      part_dims, 2_c_int, CMI_DTYPE_FLOAT, &
+                                      CMI_LAYOUT_CONTIGUOUS, CMI_OWNERSHIP_EXTERNAL)
+        call require_success(st, "create input part tensor")
+        st = c_cmi_data_create(part_data(part)%ptr, CMI_DTYPE_FLOAT)
+        call require_success(st, "create input part data")
+        st = c_cmi_data_add_tensor(part_data(part)%ptr, part_tensors(part)%ptr)
+        call require_success(st, "add input part tensor")
+     end do
+  end if
+
+  if (is_keyed) then
+     key_storage = c_null_char
+     if (.not. is_multi) then
+        call set_key(key_storage(:, 1), "input_0")
+     else if (is_mmcp == 1) then
+        do part = 1, num_inputs
+           write(env_buf, '(a,i0)') "t", part - 1
+           call set_key(key_storage(:, part), trim(env_buf))
+        end do
+     else
+        call set_key(key_storage(:, 1), "x_water")
+        call set_key(key_storage(:, 2), "x_terrain")
+     end if
+     do part = 1, num_inputs
+        input_keys(part) = c_loc(key_storage(1, part))
+     end do
+     call set_key(output_key, "output_0")
+     output_keys(1) = c_loc(output_key(1))
+  end if
+
   if (is_mmcp == 1) then
      actual_model_path = "/rwthfs/rz/cluster/hpcwork/ro092286/MMCP_2026_Artifact_Hybrid_Inference/" // &
                           "input/transformer_inference_scripted_fw2.pt"
@@ -186,7 +243,7 @@ program module_test_solver_fortran
   call require_success(st, "create coupling from config")
   if (.not. c_associated(coupling%ptr)) then
      write(*, '(a)') "[module_test_fortran] Coupling handle is null."
-     call MPI_Finalize(ierr)
+     call MPI_Abort(MPI_COMM_WORLD, 2, ierr)
      stop 2
   end if
 
@@ -207,25 +264,82 @@ program module_test_solver_fortran
      do i = 1, in_size
         flat_data(i) = flat_data(i) + real(step, c_float)
      end do
+     if (is_multi) then
+        do part = 1, num_inputs
+           do b = 0, batch_size - 1
+              do j = 1, part_dims(2)
+                 part_buffers(b * part_dims(2) + j, part) = &
+                      flat_data((b * num_inputs + part - 1) * part_dims(2) + j)
+              end do
+           end do
+        end do
+     end if
 
-     delta = 0_c_int
-     st = c_cmi_coupling_step(coupling%ptr, delta)
+     if (trim(api_mode) == "STATIC") then
+        delta = 0_c_int
+        st = c_cmi_coupling_step(coupling%ptr, delta)
+     else
+        st = CMI_SUCCESS
+        do part = 1, num_inputs
+           current_data = input_data%ptr
+           if (is_multi) current_data = part_data(part)%ptr
+           if (is_ordered) then
+              st = c_cmi_coupling_flex_ordered_set(coupling%ptr, current_data)
+           else
+              st = c_cmi_coupling_flex_keyed_set(coupling%ptr, key_storage(:, part), current_data)
+           end if
+           if (st /= CMI_SUCCESS) exit
+        end do
+        if (st == CMI_SUCCESS .and. is_ordered) then
+           st = c_cmi_coupling_flex_ordered_inference(coupling%ptr)
+           if (st == CMI_SUCCESS) st = c_cmi_coupling_flex_ordered_get(coupling%ptr, output_data%ptr)
+        else if (st == CMI_SUCCESS) then
+           st = c_cmi_coupling_flex_keyed_inference(coupling%ptr, input_keys, int(num_inputs, c_int), &
+                                                     output_keys, 1_c_int)
+           if (st == CMI_SUCCESS) st = c_cmi_coupling_flex_keyed_get(coupling%ptr, output_key, output_data%ptr)
+        end if
+     end if
      if (st /= CMI_SUCCESS) then
-        write(*, '(a,i0)') "[module_test_fortran] Inference failed at step ", step
-        call MPI_Finalize(ierr)
+        write(*, '(a,i0,a,i0)') "[module_test_fortran] Inference failed at step ", step, " on rank ", world_rank
+        call MPI_Abort(MPI_COMM_WORLD, 3, ierr)
         stop 3
      end if
 
-     if (world_rank == 0) then
-        write(*, '(a,f0.6,a)') "Inference output: [", output_buffer(1), "]"
+     st = c_cmi_data_get_tensor(output_data%ptr, 0_c_int, result_tensor)
+     call require_success(st, "get output tensor")
+     st = c_cmi_tensor_get_numel(result_tensor, output_numel)
+     call require_success(st, "get output size")
+     st = c_cmi_tensor_get_data_type(result_tensor, output_dtype)
+     call require_success(st, "get output data type")
+     st = c_cmi_tensor_get_layout(result_tensor, output_layout)
+     call require_success(st, "get output layout")
+     if (output_numel /= int(out_size, c_size_t) .or. output_dtype /= CMI_DTYPE_FLOAT .or. &
+         output_layout /= CMI_LAYOUT_CONTIGUOUS) then
+        write(*, '(a,i0)') "[module_test_fortran] Unexpected output tensor size, type or layout on rank ", world_rank
+        call MPI_Abort(MPI_COMM_WORLD, 3, ierr)
+        stop 3
      end if
-     outputs_first(step + 1) = output_buffer(1)
+     st = c_cmi_tensor_get_data(result_tensor, result_ptr)
+     call require_success(st, "get output data")
+     if (.not. c_associated(result_ptr)) then
+        write(*, '(a,i0)') "[module_test_fortran] Output data is null on rank ", world_rank
+        call MPI_Abort(MPI_COMM_WORLD, 3, ierr)
+        stop 3
+     end if
+     call c_f_pointer(result_ptr, actual_output, [out_size])
+     if (world_rank == 0) then
+        write(*, '(a,f0.6,a)') "Inference output: [", actual_output(1), "]"
+     end if
+     outputs_first(step + 1) = actual_output(1)
 
      checksum = 0.0_c_float
      do i = 1, out_size
-        checksum = checksum + output_buffer(i)
+        checksum = checksum + actual_output(i)
      end do
      outputs_sum(step + 1) = checksum
+     nullify(actual_output)
+     st = c_cmi_tensor_destroy(result_tensor)
+     call require_success(st, "destroy output tensor handle")
   end do
 
   allocate(all_first(steps, local_size))
@@ -265,6 +379,12 @@ program module_test_solver_fortran
   ! Match the C++/C drivers: destroy the coupling (provider finalize) first.
   st = c_cmi_coupling_destroy(coupling%ptr)
   st = c_cmi_config_overrides_destroy(overrides%ptr)
+  if (is_multi) then
+     do part = 1, num_inputs
+        st = c_cmi_data_destroy(part_data(part)%ptr)
+        st = c_cmi_tensor_destroy(part_tensors(part)%ptr)
+     end do
+  end if
   st = c_cmi_data_destroy(input_data%ptr)
   st = c_cmi_data_destroy(output_data%ptr)
   st = c_cmi_tensor_destroy(input_tensor%ptr)
@@ -274,6 +394,17 @@ program module_test_solver_fortran
   call c_exit_now(0_c_int)
 
 contains
+
+  subroutine set_key(dst, src)
+    character(kind=c_char), intent(out) :: dst(:)
+    character(len=*), intent(in) :: src
+    integer :: idx
+
+    dst = c_null_char
+    do idx = 1, len_trim(src)
+       dst(idx) = src(idx:idx)
+    end do
+  end subroutine set_key
 
   subroutine to_c_string(src, dst)
     character(len=*), intent(in) :: src
@@ -303,8 +434,8 @@ contains
     character(len=*), intent(in) :: what
 
     if (status /= CMI_SUCCESS) then
-       write(*, '(a,a,a)') "[module_test_fortran] ", trim(what), " failed."
-       call MPI_Finalize(ierr)
+       write(*, '(a,a,a,i0)') "[module_test_fortran] ", trim(what), " failed on rank ", world_rank
+       call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
        stop 1
     end if
   end subroutine require_success

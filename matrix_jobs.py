@@ -14,6 +14,7 @@ The scheduler is deliberately split into two layers:
 import argparse
 import json
 import os
+import random
 import shlex
 import shutil
 import signal
@@ -101,23 +102,101 @@ class PreflightError(RuntimeError):
 # CLI helpers
 # ---------------------------------------------------------------------------
 def add_filter_args(parser):
-    parser.add_argument("--providers", nargs="+", default=None, choices=PROVIDERS)
-    parser.add_argument("--devices", nargs="+", default=None, choices=DEVICES)
-    parser.add_argument("--models", nargs="+", default=None, choices=MODELS)
-    parser.add_argument("--api-modes", nargs="+", default=None, choices=API_MODES)
-    parser.add_argument("--api-langs", nargs="+", default=None, choices=API_LANGS_ALL)
+    parser.add_argument("--providers", nargs="+", default=None, choices=PROVIDERS,
+                        help="Providers to include (default: all)")
+    parser.add_argument("--devices", nargs="+", default=None, choices=DEVICES,
+                        help="Devices to include (default: all)")
+    parser.add_argument("--models", nargs="+", default=None, choices=MODELS,
+                        help="Models to include (default: all)")
+    parser.add_argument("--api-modes", nargs="+", default=None, choices=API_MODES,
+                        help="API modes to include (default: all)")
+    parser.add_argument("--api-langs", nargs="+", default=None, choices=API_LANGS_ALL,
+                        help="Solver languages to include for all API modes (default: all)")
     parser.add_argument("--workloads", nargs="+", default=None,
-                        help="Workloads as steps/clients")
-    parser.add_argument("--batch-sizes", nargs="+", type=int, default=None)
-    parser.add_argument("--scorep", nargs="+", default=None, choices=["off", "on"])
+                        help="Workloads as steps/clients, e.g. 1/1 5/2")
+    parser.add_argument("--batch-sizes", nargs="+", type=int, default=None,
+                        help="Batch sizes to include (default: 1 7)")
+    parser.add_argument("--scorep", nargs="+", default=None, choices=["off", "on"],
+                        help="Score-P modes to include (default: off on)")
     parser.add_argument("--transport-layouts", nargs="+", default=None,
-                        choices=PHYDLL_TRANSPORT_LAYOUTS)
+                        choices=PHYDLL_TRANSPORT_LAYOUTS,
+                        help="PhyDLL transport layouts (default: packed uniform_chunks)")
     parser.add_argument("--dl-modes", nargs="+", default=None,
-                        choices=PHYDLL_DL_MODES)
+                        choices=PHYDLL_DL_MODES,
+                        help="PhyDLL DL client modes (default: cpp python)")
 
 
-def add_resource_args(parser):
-    parser.add_argument("--executor", choices=["local", "slurm"], default=None)
+def add_selection_args(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--max-cases", type=int, default=None,
+                       help="Run only the first N selected cases in canonical order")
+    group.add_argument("--sample", type=int, default=None,
+                       help="Run a random sample of N selected cases")
+    group.add_argument("--job-ids", nargs="+", type=int, default=None,
+                       help="Run exactly these global job IDs (see plan --csv)")
+    parser.add_argument("--ids-file", default="",
+                        help="File with one global job ID per line (combines with --job-ids)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seed for --sample (default: 0)")
+
+
+def _read_ids_file(path):
+    ids = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        ids.append(int(line))
+    return ids
+
+
+def apply_selection(selected, args):
+    """Apply --max-cases / --sample / --job-ids to the filtered cases."""
+    ids = []
+    if getattr(args, "job_ids", None):
+        ids.extend(args.job_ids)
+    if getattr(args, "ids_file", ""):
+        ids.extend(_read_ids_file(args.ids_file))
+    if ids:
+        if (getattr(args, "max_cases", None) is not None
+                or getattr(args, "sample", None) is not None):
+            raise SystemExit("--job-ids/--ids-file cannot be combined with "
+                             "--max-cases/--sample")
+        by_id = {case["job_id"]: case for case in selected}
+        missing = [job_id for job_id in ids if job_id not in by_id]
+        if missing:
+            raise SystemExit(f"job IDs not in the filtered selection: {missing}")
+        seen = set()
+        ordered = []
+        for job_id in ids:
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            ordered.append(by_id[job_id])
+        return ordered, {"mode": "job_ids",
+                         "job_ids": [case["job_id"] for case in ordered]}
+
+    if getattr(args, "sample", None) is not None:
+        if args.sample <= 0:
+            raise SystemExit("--sample must be positive")
+        rng = random.Random(args.seed)
+        chosen = rng.sample(selected, min(args.sample, len(selected)))
+        return chosen, {"mode": "sample", "sample": args.sample,
+                        "seed": args.seed,
+                        "job_ids": [case["job_id"] for case in chosen]}
+
+    if getattr(args, "max_cases", None) is not None:
+        if args.max_cases <= 0:
+            raise SystemExit("--max-cases must be positive")
+        chosen = selected[: args.max_cases]
+        return chosen, {"mode": "max_cases", "max_cases": args.max_cases}
+
+    return selected, {"mode": "all"}
+
+
+def add_resource_args(parser, rerun=False):
+    parser.add_argument("--executor", choices=["local", "slurm"], default=None,
+                        help="Execution backend (default: local)")
     parser.add_argument("-k", "--max-jobs", dest="k", type=int, default=None,
                         help="Maximum simultaneously scheduled jobs (default: 4)")
     parser.add_argument("--cpus-per-job", type=int, default=None,
@@ -131,18 +210,29 @@ def add_resource_args(parser):
                         help="Per-job timeout in seconds (default: 900)")
     parser.add_argument("--time", default="",
                         help="SLURM walltime (default: timeout + 10 min)")
-    parser.add_argument("--partition-cpu", default="")
-    parser.add_argument("--account-cpu", default="")
-    parser.add_argument("--partition-gpu", default="")
-    parser.add_argument("--account-gpu", default="")
-    parser.add_argument("--gres-gpu", default="gpu:1")
+    parser.add_argument("--partition-cpu", default="",
+                        help="SLURM partition for CPU jobs")
+    parser.add_argument("--account-cpu", default="",
+                        help="SLURM account for CPU jobs")
+    parser.add_argument("--partition-gpu", default="",
+                        help="SLURM partition for GPU jobs")
+    parser.add_argument("--account-gpu", default="",
+                        help="SLURM account for GPU jobs")
+    parser.add_argument("--gres-gpu", default="gpu:1",
+                        help="SLURM GPU request per GPU job (default: gpu:1)")
     parser.add_argument("--sbatch-extra", default="",
                         help="Extra sbatch arguments (shell-quoted)")
-    parser.add_argument("--scorep-mpp", default=os.environ.get("SCOREP_MPP", "none"))
+    parser.add_argument("--scorep-mpp", default=None if rerun else os.environ.get("SCOREP_MPP", "none"),
+                        help=("Score-P MPI mode (default: source run, then SCOREP_MPP or none)"
+                              if rerun else "Score-P MPI mode (default: SCOREP_MPP or none)"))
     parser.add_argument("--skip-build", action="store_true",
                         help="Do not rebuild PhyDLL DL clients during preflight")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print per-job command/start details")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress local progress output")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show the selection and exit without creating a run")
 
 
 def filters_from_args(args):
@@ -204,9 +294,12 @@ def make_run_id(prefix=""):
 # ---------------------------------------------------------------------------
 # Planning / templates
 # ---------------------------------------------------------------------------
-def print_plan(selected, show_all=False, limit=100, as_csv=False):
+def print_plan(selected, show_all=False, limit=100, as_csv=False, selection=None):
     print(f"Universe: {UNIVERSE_HASH} (matrix v{MATRIX_VERSION})")
-    print(f"Selected cases: {len(selected)}")
+    suffix = ""
+    if selection and selection.get("mode") not in (None, "all"):
+        suffix = f"  [selection: {selection.get('mode')}]"
+    print(f"Selected cases: {len(selected)}{suffix}")
     by_provider = {}
     for case in selected:
         by_provider.setdefault(case["provider"], []).append(case["job_id"])
@@ -266,7 +359,23 @@ def write_run_snapshot(run, selected, run_dir):
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
+def scorep_elf(path):
+    try:
+        return subprocess.check_output(["readelf", "-d", str(path)], text=True,
+                                       stderr=subprocess.STDOUT, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PreflightError(f"Cannot inspect Score-P ELF dependencies for {path}: {exc}") from exc
+
+
 def preflight(selected, args, run_dir):
+    scorep_cases = [case for case in selected if case["scorep"] == "on"]
+    if (os.environ.get("MODULE_TEST_BUILD_DIR") and scorep_cases
+            and any(case["scorep"] == "off" for case in selected)):
+        raise PreflightError("MODULE_TEST_BUILD_DIR cannot be used with mixed Score-P on/off cases; "
+                             "select one --scorep mode per run or unset the override")
+    if scorep_cases and (args.scorep_mpp or "none") != "none":
+        raise PreflightError("Score-P matrix profiling requires --scorep-mpp none: "
+                             "per-rank validation is unsupported for MPI mode")
     missing_solvers = []
     pairs = {(case["api_lang"], case["scorep"]) for case in selected}
     for api_lang, scorep_mode in sorted(pairs):
@@ -279,6 +388,34 @@ def preflight(selected, args, run_dir):
             "\nRun ./build.sh and ./build.sh --scorep first (or set MODULE_TEST_BUILD_DIR)."
         )
 
+    for api_lang in sorted({case["api_lang"] for case in scorep_cases}):
+        binary = solver_binary(api_lang, "on", args.scorep_mpp)
+        dynamic = scorep_elf(binary)
+        if "libscorep_measurement.so" not in dynamic:
+            raise PreflightError(f"Score-P solver is not linked to the measurement runtime: {binary}; rebuild it")
+        if any(case["device"] == "CPU" and case["api_lang"] == api_lang
+               for case in scorep_cases):
+            # Inspect embedded search paths and the standard installation without
+            # relying on the submit node having compute-node driver libraries.
+            import re
+            paths = []
+            for value in re.findall(r"(?:RPATH|RUNPATH).*?\[(.*?)\]", dynamic):
+                paths.extend(value.split(":"))
+            paths.extend(os.environ.get("LD_LIBRARY_PATH", "").split(":"))
+            candidates = []
+            for directory in paths:
+                if not directory:
+                    continue
+                directory = directory.replace("${ORIGIN}", str(binary.parent)).replace("$ORIGIN", str(binary.parent))
+                library = Path(directory) / "libAIxeleratorService.so"
+                if library.is_file():
+                    candidates.append(library)
+            if not candidates:
+                candidates.append(CMI_DIR / "extern" / "AIxeleratorService" / "INSTALL-SCOREP" / "lib" / "libAIxeleratorService.so")
+            for library in candidates:
+                if library.is_file() and "[libnvidia-ml.so.1]" in scorep_elf(library):
+                    raise PreflightError(f"CPU Score-P may load {library}, which requires libnvidia-ml.so.1; rebuild the stale AIX installation without that dependency")
+
     if any(case["provider"] == "PHYDLL" for case in selected):
         for scorep_mode in sorted({case["scorep"] for case in selected
                                    if case["provider"] == "PHYDLL"}):
@@ -286,15 +423,20 @@ def preflight(selected, args, run_dir):
                        and case["scorep"] == scorep_mode for case in selected):
                 continue
             build_dir = CMI_DIR / "dl_clients" / (
-                "build-scorep-none" if scorep_mode == "on" else "build-module-test"
+                "build-module-test-scorep-none" if scorep_mode == "on" else "build-module-test"
             )
             if not args.skip_build:
-                prepare_phydll_dl_client(scorep_mode)
-            client = build_dir / "phydll_dl_client"
+                try:
+                    prepare_phydll_dl_client(scorep_mode)
+                except RuntimeError as exc:
+                    raise PreflightError(str(exc)) from exc
+            client = Path(os.environ.get("PHYDLL_DL_CLIENT") or build_dir / "phydll_dl_client")
             if not client.is_file():
                 raise PreflightError(
                     f"Missing PhyDLL C++ DL client: {client}; run without --skip-build."
                 )
+            if scorep_mode == "on" and "libscorep_measurement.so" not in scorep_elf(client):
+                raise PreflightError(f"Score-P PhyDLL C++ client is not linked to the measurement runtime: {client}; rebuild it")
 
     if args.executor == "slurm":
         if not have_sbatch():
@@ -317,7 +459,7 @@ def preflight(selected, args, run_dir):
               f"{args.cpus_per_job_gpu}.", file=sys.stderr)
 
 
-def build_run_record(args, selected, run_id, parent_run_id=None):
+def build_run_record(args, selected, run_id, parent_run_id=None, selection=None):
     timeout_s = float(args.timeout)
     time_limit = args.time or default_time_limit(timeout_s)
     return {
@@ -343,7 +485,10 @@ def build_run_record(args, selected, run_id, parent_run_id=None):
         "gres_gpu": args.gres_gpu or "gpu:1",
         "time_limit": time_limit,
         "sbatch_extra": args.sbatch_extra or "",
-        "filters_json": json.dumps(filters_from_args(args), sort_keys=True),
+        "filters_json": json.dumps(
+            {**filters_from_args(args), "selection": selection or {"mode": "all"}},
+            sort_keys=True,
+        ),
         "build_json": json.dumps(build_provenance(), sort_keys=True),
         "scorep_mpp": args.scorep_mpp,
         "analysis_status": "pending",
@@ -358,7 +503,7 @@ def create_run_and_jobs(run, selected, runs_dir):
     copy_templates(selected, run_dir)
     universe_root = Path(runs_dir) / run["universe_hash"]
     db_file = db_path(runs_dir, run["universe_hash"])
-    conn = init_db(db_file, run["universe_hash"], MATRIX_VERSION)
+    conn = init_db(db_file, run["universe_hash"], run["matrix_version"])
     if get_run(conn, run["run_id"]):
         conn.close()
         raise SystemExit(f"Run {run['run_id']} already exists")
@@ -388,12 +533,17 @@ def launch_local(job, run, runs_dir, verbose):
     )
 
 
-def run_local_scheduler(conn, run, runs_dir, db_file, verbose=False, poll=0.5):
+def run_local_scheduler(conn, run, runs_dir, db_file, verbose=False,
+                        quiet=False, poll=0.5):
     run_id = run["run_id"]
     k = max(1, int(run["k"] or 1))
     mark_run_started(conn, run_id)
     procs = {}
     interrupted = False
+    start_ts = time.time()
+    last_heartbeat = start_ts
+    if not quiet:
+        print(f"[local] {run_id}: launching up to {k} concurrent job(s)", flush=True)
     try:
         while True:
             pending = pending_jobs(conn, run_id)
@@ -408,12 +558,10 @@ def run_local_scheduler(conn, run, runs_dir, db_file, verbose=False, poll=0.5):
                     insert_event(conn, run_id, job["job_id"], "launch_failed",
                                  {"error": str(exc)})
 
-            finished = []
             for job_id, process in list(procs.items()):
                 returncode = process.poll()
                 if returncode is None:
                     continue
-                finished.append(job_id)
                 del procs[job_id]
                 row = get_job(conn, run_id, job_id)
                 if row and row["status"] not in TERMINAL_STATUSES:
@@ -423,21 +571,38 @@ def run_local_scheduler(conn, run, runs_dir, db_file, verbose=False, poll=0.5):
                         error_excerpt=f"wrapper exited with {returncode} "
                                       f"without recording a terminal state",
                     )
-                if verbose:
+                    row = get_job(conn, run_id, job_id)
+                if not quiet:
                     counts = get_counts(conn, run_id)
                     done = sum(counts.get(status, 0) for status in TERMINAL_STATUSES)
+                    status = (row or {}).get("status", "?")
+                    duration = (row or {}).get("duration_s")
+                    duration_txt = f" {duration:.1f}s" if duration is not None else ""
                     print(f"[{done:>5}/{counts['total']:<5}] job {job_id:05d} "
-                          f"{(row or {}).get('status', '?')}", flush=True)
+                          f"{status}{duration_txt}  "
+                          f"running={counts.get('running', 0)} "
+                          f"pending={counts.get('pending', 0)}", flush=True)
+                    last_heartbeat = time.time()
 
             if all_terminal(conn, run_id):
                 break
             if not procs and not pending_jobs(conn, run_id):
                 break
+
+            now = time.time()
+            if not quiet and now - last_heartbeat >= 20:
+                counts = get_counts(conn, run_id)
+                done = sum(counts.get(status, 0) for status in TERMINAL_STATUSES)
+                print(f"[{done:>5}/{counts['total']:<5}] "
+                      f"running={counts.get('running', 0)} "
+                      f"pending={counts.get('pending', 0)}  "
+                      f"elapsed={format_duration(now - start_ts)}", flush=True)
+                last_heartbeat = now
             time.sleep(poll)
     except KeyboardInterrupt:
         interrupted = True
-        print("\n[local] interrupted; waiting for active jobs (Ctrl-C again to abandon)...",
-              flush=True)
+        print("\n[local] interrupted; waiting for active jobs "
+              "(Ctrl-C again to abandon)...", flush=True)
         for process in procs.values():
             try:
                 process.wait()
@@ -458,7 +623,6 @@ def run_local_scheduler(conn, run, runs_dir, db_file, verbose=False, poll=0.5):
             except Exception as exc:
                 insert_event(conn, run_id, None, "analysis_error", {"error": str(exc)})
     return get_counts(conn, run_id)
-
 
 # ---------------------------------------------------------------------------
 # SLURM scheduler
@@ -626,12 +790,73 @@ def watch_loop(conn, run, runs_dir, db_file, interval=60.0, verbose=False, once=
     return get_counts(conn, run_id)
 
 
+def compact_run_directory(run_dir, archive_scorep=False):
+    """Reclaim filesystem inodes by removing transient state, configs, and Score-P boilerplate."""
+    run_dir = Path(run_dir).resolve()
+    removed_files = 0
+    removed_dirs = 0
+    scorep_dir = run_dir / "scorep"
+    tar_path = run_dir / "scorep.tar"
+    if archive_scorep and scorep_dir.is_dir() and any(scorep_dir.iterdir()) and tar_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing archive: {tar_path}")
+
+    # 1. State directory: remove transient socket/endpoint/telemetry files and empty dirs
+    state_dir = run_dir / "state"
+    if state_dir.is_dir():
+        for job_dir in list(state_dir.iterdir()):
+            if job_dir.is_dir():
+                shutil.rmtree(job_dir, ignore_errors=True)
+                removed_dirs += 1
+        try:
+            state_dir.rmdir()
+            removed_dirs += 1
+        except OSError:
+            pass
+
+    # 2. Configs: remove per-job TOML files (keeping templates/ directory)
+    configs_dir = run_dir / "configs"
+    if configs_dir.is_dir():
+        for toml in configs_dir.glob("*.toml"):
+            try:
+                toml.unlink()
+                removed_files += 1
+            except OSError:
+                pass
+
+    # 3. Score-P boilerplate: remove MANIFEST.md and scorep.cfg from rank dirs that have profile.cubex
+    if scorep_dir.is_dir():
+        for rank_dir in scorep_dir.glob("*_rank_*"):
+            if rank_dir.is_dir() and (rank_dir / "profile.cubex").is_file():
+                for name in ("MANIFEST.md", "scorep.cfg"):
+                    p = rank_dir / name
+                    if p.is_file():
+                        try:
+                            p.unlink()
+                            removed_files += 1
+                        except OSError:
+                            pass
+        if archive_scorep and any(scorep_dir.iterdir()):
+            try:
+                subprocess.run(
+                    ["tar", "-cf", str(tar_path), "-C", str(run_dir), "scorep"],
+                    check=True, capture_output=True, text=True,
+                )
+                shutil.rmtree(scorep_dir, ignore_errors=True)
+                removed_dirs += 1
+            except Exception as exc:
+                raise RuntimeError(f"archiving scorep failed: {exc}") from exc
+
+    return removed_files, removed_dirs
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 def cmd_plan(args):
     selected = select_cases(**filters_from_args(args))
-    print_plan(selected, show_all=args.all, limit=args.limit, as_csv=args.csv)
+    selected, selection = apply_selection(selected, args)
+    print_plan(selected, show_all=args.all, limit=args.display_limit,
+               as_csv=args.csv, selection=selection)
     return 0
 
 
@@ -644,11 +869,12 @@ def cmd_submit(args):
     )
     args.timeout = 900.0 if args.timeout is None else args.timeout
     selected = select_cases(**filters_from_args(args))
+    selected, selection = apply_selection(selected, args)
     if not selected:
-        print("No cases matched the filters", file=sys.stderr)
+        print("No cases matched the filters/selection", file=sys.stderr)
         return 2
     if args.dry_run:
-        print_plan(selected, show_all=True)
+        print_plan(selected, show_all=True, selection=selection)
         return 0
     if args.k < 1:
         print("k must be >= 1", file=sys.stderr)
@@ -661,14 +887,14 @@ def cmd_submit(args):
     if "/" in run_id or "\\" in run_id or run_id in (".", ".."):
         print(f"Invalid run id: {run_id!r}", file=sys.stderr)
         return 2
-    run = build_run_record(args, selected, run_id)
+    run = build_run_record(args, selected, run_id, selection=selection)
     runs_dir = Path(args.runs_dir).resolve()
     conn, run_dir, db_file = create_run_and_jobs(run, selected, runs_dir)
     print(f"Run: {run_id}")
     print(f"Universe: {run['universe_hash']}  jobs: {len(selected)}  "
-          f"executor: {run['executor']}  k={run['k']}  "
-          f"cores cpu={run['cpus_per_job_cpu']} gpu={run['cpus_per_job_gpu']} "
-          f"(base={run['cpus_per_job']})")
+          f"selection: {selection.get('mode')}  executor: {run['executor']}  "
+          f"k={run['k']}  cores cpu={run['cpus_per_job_cpu']} "
+          f"gpu={run['cpus_per_job_gpu']} (base={run['cpus_per_job']})")
     print(f"Ledger: {db_file}")
     try:
         preflight(selected, args, run_dir)
@@ -702,7 +928,7 @@ def cmd_submit(args):
         return 0
 
     counts = run_local_scheduler(conn, run, runs_dir, db_file,
-                                 verbose=args.verbose)
+                                 verbose=args.verbose, quiet=args.quiet)
     print(f"Finished: {counts.get('success', 0)} success, "
           f"{counts.get('failed', 0)} failed, {counts.get('timeout', 0)} timeout, "
           f"{counts.get('error', 0)} error")
@@ -790,7 +1016,7 @@ def cmd_resume(args):
         reset_to_pending(conn, run["run_id"], job["job_id"],
                          reason="requeued by resume")
     counts = run_local_scheduler(conn, run, runs_dir, db_file,
-                                 verbose=args.verbose)
+                                 verbose=args.verbose, quiet=args.quiet)
     print(f"Finished: {counts.get('success', 0)} success")
     conn.close()
     return 0
@@ -856,7 +1082,8 @@ def cmd_rerun(args):
             "job_ids": [case["job_id"] for case in selected],
         }, sort_keys=True),
         "build_json": json.dumps(build_provenance(), sort_keys=True),
-        "scorep_mpp": args.scorep_mpp or source_run["scorep_mpp"],
+        "scorep_mpp": (args.scorep_mpp or source_run["scorep_mpp"]
+                       or os.environ.get("SCOREP_MPP") or "none"),
         "analysis_status": "pending",
         "analysis_started_at": None,
         "analysis_finished_at": None,
@@ -896,7 +1123,8 @@ def cmd_rerun(args):
             watch_loop(new_conn, new_run, runs_dir, new_db,
                        interval=args.interval, verbose=True)
     else:
-        run_local_scheduler(new_conn, new_run, runs_dir, new_db, verbose=args.verbose)
+        run_local_scheduler(new_conn, new_run, runs_dir, new_db,
+                            verbose=args.verbose, quiet=args.quiet)
     new_conn.close()
     return 0
 
@@ -934,29 +1162,92 @@ def cmd_cancel(args):
     return 0
 
 
+def cmd_compact(args):
+    conn, run, db_file, runs_dir = load_run(args)
+    run_id = run["run_id"]
+    if run.get("status") not in ("complete", "complete_with_failures") or not all_terminal(conn, run_id):
+        print(f"Cannot compact run {run_id}: run is not complete and terminal", file=sys.stderr)
+        conn.close()
+        return 2
+    run_dir = runs_dir / run["universe_hash"] / run_id
+    try:
+        files, dirs = compact_run_directory(run_dir, archive_scorep=args.archive_scorep)
+    except (FileExistsError, RuntimeError) as exc:
+        print(f"[compact] {exc}", file=sys.stderr)
+        conn.close()
+        return 2
+    print(f"Compacted run {run_id}: removed {files} files, {dirs} directories")
+    conn.close()
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Job-based matrix scheduler with a SQLite ledger.")
+        description="Job-based matrix scheduler with a SQLite ledger.",
+        epilog="""Subcommands:
+  plan    show the selected cases and their global job IDs (no side effects)
+  submit  create a run and schedule it (local process pool or SLURM chain)
+  watch   repair/monitor a SLURM run
+  resume  rerun pending/active jobs after an interruption
+  rerun   rerun failed/timeout jobs in a new run
+  cancel  cancel pending/active jobs
+
+Examples:
+  python3 matrix_jobs.py plan --providers PHYDLL --devices CPU --all
+  python3 matrix_jobs.py submit --job-ids 1729 1735 1741 --executor local -k 2
+  python3 matrix_jobs.py submit --providers AIX PHYDLL --devices CPU --models watercnn --api-modes STATIC --api-langs cpp c fortran --workloads 1/1 --batch-sizes 1 --scorep off --executor local -k 3
+  python3 matrix_jobs.py submit ... --executor slurm -k 50 --partition-cpu c23ms --account-cpu rwth2150 --partition-gpu c23g --account-gpu rwth0792
+
+Use 'python3 matrix_status.py --list' to list runs and
+'python3 matrix_status.py --run-id RUN --watch 5' to monitor one.
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    plan = sub.add_parser("plan", help="Print the selected universe/IDs")
+    plan = sub.add_parser(
+        "plan", help="Print the selected universe/IDs",
+        epilog="Examples:\n"
+               "  matrix_jobs.py plan --providers PHYDLL --devices CPU --api-langs cpp c fortran --all\n"
+               "  matrix_jobs.py plan --job-ids 1729 1735 1741 --csv\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     add_filter_args(plan)
-    plan.add_argument("--limit", type=int, default=100)
-    plan.add_argument("--all", action="store_true")
-    plan.add_argument("--csv", action="store_true")
+    add_selection_args(plan)
+    plan.add_argument("--display-limit", "--limit", dest="display_limit",
+                      type=int, default=100,
+                      help="Maximum rows to print (default: 100); does not limit the run")
+    plan.add_argument("--all", action="store_true",
+                      help="Print every selected case")
+    plan.add_argument("--csv", action="store_true",
+                      help="Print machine-readable CSV")
     plan.set_defaults(func=cmd_plan)
 
-    submit = sub.add_parser("submit", help="Create a run and schedule its jobs")
+    submit = sub.add_parser(
+        "submit", help="Create a run and schedule its jobs",
+        epilog="Examples:\n"
+               "  matrix_jobs.py submit --providers PHYDLL --devices CPU --models watercnn \\\n"
+               "    --api-modes STATIC --api-langs cpp c fortran --workloads 1/1 \\\n"
+               "    --batch-sizes 1 --scorep off --executor local -k 2 --skip-build\n"
+               "  matrix_jobs.py submit --job-ids 1729 1735 1741 --executor local -k 2\n"
+               "  matrix_jobs.py submit ... --executor slurm -k 50 --partition-cpu c23ms \\\n"
+               "    --account-cpu rwth2150 --partition-gpu c23g --account-gpu rwth0792\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     add_filter_args(submit)
+    add_selection_args(submit)
     add_resource_args(submit)
-    submit.add_argument("--run-id", default="")
-    submit.add_argument("--runs-dir", default="runs")
+    submit.add_argument("--run-id", default="",
+                        help="Explicit run ID (default: timestamp + short random suffix)")
+    submit.add_argument("--runs-dir", default="runs",
+                        help="Directory for ledgers/logs (default: runs)")
     submit.add_argument("--watch", action="store_true",
                         help="Keep watching a SLURM run after seeding")
-    submit.add_argument("--interval", type=float, default=60.0)
+    submit.add_argument("--interval", type=float, default=60.0,
+                        help="Watch poll interval in seconds (default: 60)")
     submit.set_defaults(func=cmd_submit)
 
     watch = sub.add_parser("watch", help="Repair/monitor a SLURM run")
@@ -983,7 +1274,7 @@ def build_parser():
     rerun.add_argument("--status", nargs="+", default=["failed", "timeout"],
                        choices=list(BAD_STATUSES))
     rerun.add_argument("--new-run-id", default="")
-    add_resource_args(rerun)
+    add_resource_args(rerun, rerun=True)
     rerun.add_argument("--watch", action="store_true")
     rerun.add_argument("--interval", type=float, default=60.0)
     rerun.set_defaults(func=cmd_rerun)
@@ -993,6 +1284,14 @@ def build_parser():
     cancel.add_argument("--runs-dir", default="runs")
     cancel.add_argument("--universe", default="")
     cancel.set_defaults(func=cmd_cancel)
+
+    compact = sub.add_parser("compact", help="Reclaim inodes from transient artifacts in a run")
+    compact.add_argument("run_id")
+    compact.add_argument("--runs-dir", default="runs")
+    compact.add_argument("--universe", default="")
+    compact.add_argument("--archive-scorep", action="store_true",
+                         help="Pack scorep/ directory into scorep.tar")
+    compact.set_defaults(func=cmd_compact)
     return parser
 
 

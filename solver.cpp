@@ -10,6 +10,11 @@
 
 #include "ml_coupling.hpp"
 
+#ifdef MODULE_TEST_SCOREP_FINALIZE
+// Score-P's runtime-management declaration is not installed as a public header.
+extern "C" void SCOREP_FinalizeMeasurement(void);
+#endif
+
 int main(int argc, char** argv)
 {
 	fprintf(stderr, "[module_test] solver entering main before MPI_Init\n");
@@ -221,6 +226,13 @@ int main(int argc, char** argv)
 
 	float* outputs_first = new float[num_steps];
 	float* outputs_sum = new float[num_steps];
+	const bool multi_input = api_mode == "ORDERED_MULTI" || api_mode == "KEYED_MULTI";
+	const int num_inputs = is_mmcp ? 5 : 2;
+	const int features = is_mmcp ? 512 : 9;
+	const size_t part_size = static_cast<size_t>(batch_size) * features;
+	std::vector<float> parts(multi_input ? num_inputs * part_size : 0);
+	const std::vector<int> part_shape{batch_size, features};
+	std::vector<float> last_output;
 
 	for (int step = 0; step < num_steps; ++step) {
 		if (num_steps > 1) {
@@ -229,6 +241,15 @@ int main(int argc, char** argv)
 		// Increase the input data's values by step number to simulate changing input across steps
 		for (size_t i = 0; i < in_size; ++i) {
 			flat_data[i] += step;
+		}
+		if (multi_input) {
+			for (int i = 0; i < num_inputs; ++i) {
+				for (int b = 0; b < batch_size; ++b) {
+					for (int j = 0; j < features; ++j) {
+						parts[i * part_size + b * features + j] = flat_data[(b * num_inputs + i) * features + j];
+					}
+				}
+			}
 		}
 
 		auto t_start = std::chrono::high_resolution_clock::now();
@@ -253,28 +274,20 @@ int main(int argc, char** argv)
 					.inference({"input_0"}, {"output_0"})
 					.get("output_0", output_data);
 			} else if (api_mode == "ORDERED_MULTI") {
-				int num_inputs = is_mmcp ? 5 : 2;
-				std::vector<int> shape = is_mmcp ? std::vector<int>{batch_size, 512} : std::vector<int>{batch_size, 9};
-				int offset_step = (is_mmcp ? 512 : 9) * batch_size;
-				
 				auto proxy = coupling->ordered();
 				for (int i = 0; i < num_inputs; ++i) {
 					MLCouplingData<float> input_part{std::vector<MLCouplingTensor<float>>{
-						MLCouplingTensor<float>::wrap_flat(flat_data + i * offset_step, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
+						MLCouplingTensor<float>::wrap_flat(parts.data() + i * part_size, part_shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
 					}};
 					proxy.set(input_part);
 				}
 				proxy.inference().get(output_data);
 			} else if (api_mode == "KEYED_MULTI") {
-				int num_inputs = is_mmcp ? 5 : 2;
-				std::vector<int> shape = is_mmcp ? std::vector<int>{batch_size, 512} : std::vector<int>{batch_size, 9};
-				int offset_step = (is_mmcp ? 512 : 9) * batch_size;
-				
 				auto proxy = coupling->keyed();
 				std::vector<std::string> keys;
 				for (int i = 0; i < num_inputs; ++i) {
 					MLCouplingData<float> input_part{std::vector<MLCouplingTensor<float>>{
-						MLCouplingTensor<float>::wrap_flat(flat_data + i * offset_step, shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
+						MLCouplingTensor<float>::wrap_flat(parts.data() + i * part_size, part_shape, MLCouplingMemLayoutContiguous, MLCouplingOwnershipExternal)
 					}};
 					std::string key = is_mmcp ? "t" + std::to_string(i) : (i == 0 ? "x_water" : "x_terrain");
 					proxy.set(key, input_part);
@@ -284,7 +297,6 @@ int main(int argc, char** argv)
 			} else {
 				throw std::runtime_error("Unknown API_MODE: " + api_mode);
 			}
-
 			if (enable_timing) {
 				auto t_end = std::chrono::high_resolution_clock::now();
 				auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
@@ -296,6 +308,8 @@ int main(int argc, char** argv)
 					    << duration_us << "\n";
 				}
 			}
+			last_output = output_data.get_flat_data();
+			if (last_output.empty()) throw std::runtime_error("Inference returned no output values");
 
 		} catch (const std::exception& e) {
 			if (world_rank == 0) std::cerr << "Inference failed at step " << step << " (API_MODE=" << api_mode << "): " << e.what() << "\n";
@@ -306,30 +320,30 @@ int main(int argc, char** argv)
 
 		if (world_rank == 0) {
 			std::cout << "Inference output: [";
-				std::cout << output_buffer[0];
+				std::cout << last_output[0];
 			std::cout << "]\n";
 		}
-		outputs_first[step] = output_buffer[0];
+		outputs_first[step] = last_output[0];
 		// Compute checksum of full output
 		float sum = 0;
-		for (int i = 0; i < out_size; ++i) sum += output_buffer[i];
+		for (float value : last_output) sum += value;
 		outputs_sum[step] = sum;
 	}
 
 	std::cout << "###########################################################################\n";
 
-	std::cout << "All steps completed. Final outputs of rank " << world_rank << " (out_size=" << out_size << "):\n";
+	std::cout << "All steps completed. Final outputs of rank " << world_rank << " (out_size=" << last_output.size() << "):\n";
 	for (int step = 0; step < num_steps; ++step) {
 		std::cout << "  step " << step << ": first=" << std::fixed << std::setprecision(6) << outputs_first[step]
 		          << " sum=" << outputs_sum[step] << "\n";
 	}
 	// Print last step's output: first 5 ... last 5
-	if (out_size > 0) {
+	if (!last_output.empty()) {
 		std::cout << "  Last step output buffer: [";
-		int show = std::min(5, out_size);
-		for (int i = 0; i < show; ++i) std::cout << std::fixed << std::setprecision(4) << output_buffer[i] << " ";
-		if (out_size > 2 * show) std::cout << "... ";
-		for (int i = out_size - show; i < out_size; ++i) std::cout << std::fixed << std::setprecision(4) << output_buffer[i] << " ";
+		size_t show = std::min<size_t>(5, last_output.size());
+		for (size_t i = 0; i < show; ++i) std::cout << std::fixed << std::setprecision(4) << last_output[i] << " ";
+		if (last_output.size() > 2 * show) std::cout << "... ";
+		for (size_t i = std::max(show, last_output.size() - show); i < last_output.size(); ++i) std::cout << std::fixed << std::setprecision(4) << last_output[i] << " ";
 		std::cout << "]\n";
 	}
 	std::cout << "\n";
@@ -389,5 +403,8 @@ int main(int argc, char** argv)
 	// can hang after MPI_Finalize in this standalone fake solver.
 	std::cout.flush();
 	std::cerr.flush();
+#ifdef MODULE_TEST_SCOREP_FINALIZE
+	SCOREP_FinalizeMeasurement();
+#endif
 	std::_Exit(0);
 }

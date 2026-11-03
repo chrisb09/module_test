@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(realpath "${SCRIPT_DIR}/..")"
 CMI_DIR="${CMI_DIR:-${BASE_DIR}/CPP-ML-Interface}"
+AIXELERATOR_DIR="$(realpath "${CMI_DIR}/extern/AIxeleratorService")"
+AIX_SOURCE_ID="$(printf '%s' "${AIXELERATOR_DIR}" | sha256sum)"
+AIX_SOURCE_ID="${AIX_SOURCE_ID%% *}"
 
 usage() {
     cat <<'EOF'
@@ -16,6 +19,7 @@ EOF
 
 USE_SCOREP="${USE_SCOREP:-0}"
 SCOREP_MPP="${SCOREP_MPP:-mpi}"
+AIX_SCOREP_MPP="${AIX_SCOREP_MPP:-none}"
 for arg in "$@"; do
     case "${arg}" in
         --scorep)
@@ -46,10 +50,10 @@ if [[ -z "${MODULE_TEST_BUILD_DIR:-}" ]]; then
 fi
 
 if [[ "${USE_SCOREP}" == "1" ]]; then
-      AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
+      AIXELERATOR_INSTALL_PREFIX="${AIXELERATOR_INSTALL_PREFIX:-${MODULE_TEST_BUILD_DIR}/aixelerator-install}"
       export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
 else
-      AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL"
+      AIXELERATOR_INSTALL_PREFIX="${AIXELERATOR_INSTALL_PREFIX:-${CMI_DIR}/extern/AIxeleratorService/INSTALL}"
 fi
 
 # Source environment
@@ -61,6 +65,8 @@ SMARTSIM_PYTHON="${SMARTSIM_PYTHON:-${CMI_DIR}/extern/python/smartsim_cuda-12/bi
 EXTRA_CMAKE_ARGS=(
       -DCMAKE_BUILD_TYPE=Release
       -DCPP_MODULE_DIR="${CMI_DIR}"
+      -DAIXELERATOR_DIR="${AIXELERATOR_DIR}"
+      -DAIXELERATOR_PREBUILT_BUILD_DIR="${MODULE_TEST_BUILD_DIR}/aixelerator-prebuilt-build-${AIX_SOURCE_ID}"
       -DWITH_AIX=ON
       -DWITH_PHYDLL=ON
       -DWITH_SMARTSIM=ON
@@ -89,10 +95,13 @@ if [[ "${USE_SCOREP}" == "1" ]]; then
             -DWITH_SCOREP=ON
             -DCPPML_SCOREP_MPP="${SCOREP_MPP}"
             -DMODULE_TEST_SCOREP_MPP="${SCOREP_MPP}"
+            -DAIX_SCOREP_MPP="${AIX_SCOREP_MPP}"
+            -DFORCE_AIX_REBUILD=ON
             "-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DWITH_SCOREP=ON -DBUILD_TESTS=OFF"
       )
 else
       EXTRA_CMAKE_ARGS+=(
+            -DFORCE_AIX_REBUILD=OFF
             "-DAIXELERATOR_CMAKE_ARGS=-DWITH_TORCH=ON -DWITH_SCOREP=OFF -DBUILD_TESTS=OFF"
       )
 fi

@@ -37,6 +37,8 @@ from matrix_common import (  # noqa: E402
     PROVIDERS,
     WORKLOADS,
     compare_results,
+    langs_for_mode,
+    parse_summary,
     update_toml,
 )
 
@@ -567,53 +569,7 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
         finally:
             monitor.stop()
 
-        # Improved summary extraction: find numeric output ranks
-        outputs_first_vals = None
-        outputs_sum_vals = None
-        legacy_vals = None
-
-        lines = output.splitlines()
-        for i, line in enumerate(lines):
-            line_str = line.strip()
-            if "Gathered output[0] from all ranks:" in line_str:
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    candidate = lines[j].strip()
-                    if candidate.startswith("[[") and candidate.endswith("]]"):
-                        try:
-                            outputs_first_vals = json.loads(candidate)
-                            break
-                        except Exception:
-                            pass
-            elif "Gathered output sums from all ranks:" in line_str:
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    candidate = lines[j].strip()
-                    if candidate.startswith("[[") and candidate.endswith("]]"):
-                        try:
-                            outputs_sum_vals = json.loads(candidate)
-                            break
-                        except Exception:
-                            pass
-            elif "Gathered outputs from all ranks:" in line_str:
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    candidate = lines[j].strip()
-                    if candidate.startswith("[[") and candidate.endswith("]]"):
-                        try:
-                            legacy_vals = json.loads(candidate)
-                            break
-                        except Exception:
-                            pass
-
-        if outputs_first_vals is not None or outputs_sum_vals is not None:
-            res_obj = {}
-            if outputs_first_vals is not None:
-                res_obj["first"] = outputs_first_vals
-            if outputs_sum_vals is not None:
-                res_obj["sum"] = outputs_sum_vals
-            result_summary = json.dumps(res_obj)
-        elif legacy_vals is not None:
-            result_summary = json.dumps({"first": legacy_vals})
-        else:
-            result_summary = "N/A"
+        result_summary = parse_summary(output)
         
         return (
             success,
@@ -632,7 +588,7 @@ def run_command(cmd, env, target_gpu=None, run_meta=None, log_dir=None):
 
 def prepare_phydll_dl_client(scorep_mode):
     cmi_dir = CMI_DIR
-    build_dir = cmi_dir / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
+    build_dir = cmi_dir / "dl_clients" / ("build-module-test-scorep-none" if scorep_mode == "on" else "build-module-test")
     cmake_args = ["cmake", "-S", str(cmi_dir / "dl_clients"), "-B", str(build_dir)]
     if scorep_mode == "on":
         cmake_args += ["-DWITH_SCOREP=ON", "-DCPPML_SCOREP_MPP=none"]
@@ -660,7 +616,7 @@ parser.add_argument("--providers", nargs="+", default=PROVIDERS, help=f"Provider
 parser.add_argument("--devices", nargs="+", default=DEVICES, help=f"Devices to test (default: {DEVICES})")
 parser.add_argument("--models", nargs="+", default=MODELS, help=f"Models to test (default: {MODELS})")
 parser.add_argument("--api-modes", nargs="+", default=API_MODES, help=f"API modes to test (default: {API_MODES})")
-parser.add_argument("--api-langs", nargs="+", default=["cpp"], choices=API_LANGS_ALL, help="Solver API languages to test (default: cpp). C/Fortran currently support STATIC only.")
+parser.add_argument("--api-langs", nargs="+", default=["cpp"], choices=API_LANGS_ALL, help="Solver API languages to test in all modes (default: cpp)")
 parser.add_argument("--workloads", nargs="+", help="Workloads as 'steps/clients' (default: all)")
 parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 7], help="Batch sizes to test (default: [1, 7])")
 parser.add_argument("--verbose", action="store_true", help="Print the command and env vars before execution")
@@ -680,12 +636,6 @@ API_MODES = [a for a in args.api_modes if a in API_MODES]
 API_LANGS = [lang for lang in args.api_langs if lang in API_LANGS_ALL]
 if not API_LANGS:
     API_LANGS = ["cpp"]
-
-def langs_for_mode(api_mode):
-    # The C and Fortran drivers currently implement the static coupling path.
-    if api_mode == "STATIC":
-        return API_LANGS
-    return [lang for lang in API_LANGS if lang == "cpp"]
 
 if args.workloads:
     WORKLOADS = []
@@ -734,7 +684,7 @@ for provider in PROVIDERS:
                 # mmcp_transformer only makes sense in MULTI modes for this test
                 if model == "mmcp_transformer" and "MULTI" not in api_mode:
                     continue
-                total_tests += dl_count * layout_count * len(langs_for_mode(api_mode)) * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
+                total_tests += dl_count * layout_count * len(langs_for_mode(api_mode, API_LANGS)) * len(WORKLOADS) * len(BATCH_SIZES) * len(args.scorep)
 
 done_tests = 0
 start_ts = time.time()
@@ -761,7 +711,7 @@ for provider in PROVIDERS:
                         else:
                             current_model = model
 
-                        for api_lang in langs_for_mode(api_mode):
+                        for api_lang in langs_for_mode(api_mode, API_LANGS):
                             for steps, clients in WORKLOADS:
                                 for batch_size in BATCH_SIZES:
                                     config_file_name = None # default logic in run.sh
@@ -785,7 +735,7 @@ for provider in PROVIDERS:
                                         env["PHYDLL_PY_SCOREP_WRAPPER"] = "1" if (scorep_mode == "on" and dl_mode == "python") else "0"
                                         env["PHYDLL_REBUILD_DL_CLIENT"] = "0"
                                         if dl_mode != "python":
-                                            dl_build_dir = CMI_DIR / "dl_clients" / ("build-scorep-none" if scorep_mode == "on" else "build-module-test")
+                                            dl_build_dir = CMI_DIR / "dl_clients" / ("build-module-test-scorep-none" if scorep_mode == "on" else "build-module-test")
                                             env["PHYDLL_DL_BUILD_DIR"] = str(dl_build_dir)
                                         # uniform_chunks splits the per-rank output into dl_count fields.
                                         # Module-test shapes: [B,18]->[B] => 1 field; MMCP [B,5,512]->[B,2,512] => 2 fields.

@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -19,6 +20,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 from matrix_common import (
@@ -235,7 +237,7 @@ def build_env(run, job, config_path, state_dir, log_path):
     if job["scorep"] == "on":
         run_dir = log_path.parent.parent
         env["SCOREP_EXPERIMENT_DIRECTORY"] = str(
-            run_dir / "scorep" / f"{job['job_id']:05d}"
+            run_dir / "scorep" / f"{job['job_id']:05d}_{uuid.uuid4().hex}"
         )
         env["SCOREP_OVERWRITE_EXPERIMENT_DIRECTORY"] = "true"
     env["MODULE_TEST_RUN_ID"] = f"{run['run_id']}_{job['job_id']}"
@@ -257,7 +259,7 @@ def build_env(run, job, config_path, state_dir, log_path):
             "1" if job["scorep"] == "on" and job["dl_mode"] == "python" else "0"
         )
         dl_build = CMI_DIR / "dl_clients" / (
-            "build-scorep-none" if job["scorep"] == "on" else "build-module-test"
+            "build-module-test-scorep-none" if job["scorep"] == "on" else "build-module-test"
         )
         env["PHYDLL_DL_BUILD_DIR"] = str(dl_build)
         if job["layout"] == "uniform_chunks" and "mmcp" in job["effective_model"]:
@@ -307,6 +309,8 @@ def run_case(run, job, config_path, state_dir, log_path, on_start=None):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as handle:
         handle.write(header)
+        if job["scorep"] == "on":
+            handle.write(f"# Score-P experiment prefix: {env['SCOREP_EXPERIMENT_DIRECTORY']}\n")
 
     monitor = ResourceMonitor(enable_gpu=(job["device"] == "GPU"))
     start = time.time()
@@ -351,6 +355,23 @@ def run_case(run, job, config_path, state_dir, log_path, on_start=None):
             if timed_out:
                 handle.write(f"\n[matrix] TIMEOUT after {timeout_s:.0f}s\n")
 
+    profile_error = None
+    if job["scorep"] == "on" and not timed_out and returncode == 0:
+        if env["SCOREP_MPP"] != "none":
+            profile_error = "per-rank Score-P validation requires SCOREP_MPP=none"
+        else:
+            ranks = int(job["clients"]) + int(job["provider"] == "PHYDLL")
+            profiles = [Path(f"{env['SCOREP_EXPERIMENT_DIRECTORY']}_rank_{rank}") / "profile.cubex"
+                        for rank in range(ranks)]
+            missing = [str(path) for path in profiles
+                       if not path.is_file() or path.stat().st_size == 0]
+            if missing:
+                profile_error = "missing or empty Score-P profiles: " + ", ".join(missing)
+        if profile_error:
+            output = (output or "") + f"\n[matrix] {profile_error}\n"
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write(f"\n[matrix] {profile_error}\n")
+
     metrics = {
         "cpu_solver_mb": 0.0,
         "cpu_ml_mb": 0.0,
@@ -366,6 +387,7 @@ def run_case(run, job, config_path, state_dir, log_path, on_start=None):
         "output": output or "",
         "pid": pid,
         "metrics": metrics,
+        "profile_error": profile_error,
     }
 
 
@@ -422,6 +444,40 @@ def maybe_analyze(conn, db_file, run_id):
         insert_event(conn, run_id, None, "analysis_error", {"error": str(exc)})
 
 
+def cleanup_successful_job(run, job, state_dir, config_path, log_path):
+    """Reclaim filesystem inodes on successful job completion."""
+    if os.environ.get("MATRIX_KEEP_SUCCESS_FILES", "0") == "1":
+        return
+    try:
+        # 1. State directory: transient socket/endpoint/telemetry files
+        if state_dir and state_dir.is_dir():
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+        # 2. Per-job config: template stays in configs/templates/ and params in SQLite
+        if config_path and config_path.is_file():
+            config_path.unlink(missing_ok=True)
+
+        # 3. Score-P boilerplate: remove MANIFEST.md and scorep.cfg, keep profile.cubex
+        if job.get("scorep") == "on" and log_path:
+            scorep_dir = log_path.parent.parent / "scorep"
+            if scorep_dir.is_dir():
+                for rank_dir in scorep_dir.glob(f"{job['job_id']:05d}_*_rank_*"):
+                    if rank_dir.is_dir() and (rank_dir / "profile.cubex").is_file():
+                        (rank_dir / "MANIFEST.md").unlink(missing_ok=True)
+                        (rank_dir / "scorep.cfg").unlink(missing_ok=True)
+
+        # 4. PhyDLL stdout/core log in working directory
+        if job.get("provider") == "PHYDLL":
+            slurm_job_id = os.environ.get("SLURM_JOB_ID")
+            if slurm_job_id:
+                for p in MODULE_TEST_DIR.glob(f"phydll-*{slurm_job_id}*.log"):
+                    p.unlink(missing_ok=True)
+            for p in MODULE_TEST_DIR.glob("phydll-(null).log"):
+                p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run one matrix case.")
     parser.add_argument("--universe", required=True)
@@ -451,7 +507,8 @@ def main(argv=None):
     log_path = run_dir / "logs" / f"{args.job_id:05d}.log"
     state_dir = run_dir / "state" / f"{args.job_id:05d}"
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "smartsim").mkdir(parents=True, exist_ok=True)
+    if job.get("provider") == "SMARTSIM":
+        (state_dir / "smartsim").mkdir(parents=True, exist_ok=True)
 
     templates = ensure_templates(run_dir)
     template_name = config_template_name(job["provider"], job["device"], job["api_mode"])
@@ -512,6 +569,10 @@ def main(argv=None):
             status = "timeout"
             error_kind = "timeout"
             exit_code = 124
+        elif result.get("profile_error"):
+            status = "failed"
+            error_kind = "scorep_profile"
+            exit_code = result["returncode"]
         elif result["returncode"] == 0:
             status = "success"
             error_kind = None
@@ -541,6 +602,10 @@ def main(argv=None):
             "exit_code": exit_code,
         })
         maybe_analyze(conn, db_file, args.run_id)
+
+        if status == "success":
+            cleanup_successful_job(run, job, state_dir, config_path, log_path)
+
         return 0 if status == "success" else (124 if status == "timeout" else 1)
     except Exception:
         excerpt = traceback.format_exc()

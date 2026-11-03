@@ -94,18 +94,16 @@ if [[ ! -x "${SOLVER_BIN}" ]]; then
     exit 1
 fi
 
-if [[ "${API_LANG}" != "cpp" && "${API_MODE}" != "STATIC" ]]; then
-    echo "API_LANG=${API_LANG} currently supports only API_MODE=STATIC (got ${API_MODE})." >&2
-    exit 1
+if [[ -z "${AIXELERATOR_INSTALL_PREFIX:-}" && -f "${MODULE_TEST_BUILD_DIR}/build_state.env" ]]; then
+    AIXELERATOR_INSTALL_PREFIX="$(grep '^AIXELERATOR_PREBUILT_INSTALL_PREFIX=' "${MODULE_TEST_BUILD_DIR}/build_state.env" | tail -n 1 | cut -d= -f2- || true)"
 fi
-
 if [[ "${USE_SCOREP}" == "1" ]]; then
-    AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL-SCOREP"
+    AIXELERATOR_INSTALL_PREFIX="${AIXELERATOR_INSTALL_PREFIX:-${MODULE_TEST_BUILD_DIR}/aixelerator-install}"
     export SCOREP_WRAPPER_INSTRUMENTER_FLAGS="${SCOREP_WRAPPER_INSTRUMENTER_FLAGS:---nocompiler --user --mpp=${SCOREP_MPP} --io=none --memory=malloc --thread=none --nocuda}"
     export SCOREP_ENABLE_PROFILING=true
     export SCOREP_ENABLE_TRACING=false
 else
-    AIXELERATOR_INSTALL_PREFIX="${CMI_DIR}/extern/AIxeleratorService/INSTALL"
+    AIXELERATOR_INSTALL_PREFIX="${AIXELERATOR_INSTALL_PREFIX:-${CMI_DIR}/extern/AIxeleratorService/INSTALL}"
 fi
 
 # Source environment
@@ -260,7 +258,14 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     # Staging runtime libs if they exist
     RUNTIME_EXTRA_LIB_DIR="${PY_ENV}/runtime_libs"
     if [[ -d "${RUNTIME_EXTRA_LIB_DIR}" ]]; then
-            export LD_LIBRARY_PATH="${RUNTIME_EXTRA_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+            # Append, do not prepend: the SmartSim runtime ships an older
+            # libstdc++ (CXXABI_1.3.14) that would otherwise shadow GCC 14's
+            # CXXABI_1.3.15 required by the CMI library.
+            if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+                export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${RUNTIME_EXTRA_LIB_DIR}"
+            else
+                export LD_LIBRARY_PATH="${RUNTIME_EXTRA_LIB_DIR}"
+            fi
             echo "Using runtime extra libs from ${RUNTIME_EXTRA_LIB_DIR}"
     fi
 
@@ -288,19 +293,58 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
             CONTROLLER_ARGS+=("--intra-op-threads" "${OMP_NUM_THREADS}" "--cpu-cores-per-node" "${OMP_NUM_THREADS}")
     fi
 
+    # SmartSim polls sacct every two seconds, before its own 120s DB readiness
+    # timeout begins. Leave room for both phases and controller startup.
+    export SMARTSIM_WLM_TRIALS="${SMARTSIM_WLM_TRIALS:-60}"
+    if [[ ! "${SMARTSIM_WLM_TRIALS}" =~ ^[1-9][0-9]{0,5}$ ]]; then
+            echo "SMARTSIM_WLM_TRIALS must be a positive integer (at most 999999)." >&2
+            exit 1
+    fi
+    SMARTSIM_ENDPOINT_TIMEOUT="${SMARTSIM_ENDPOINT_TIMEOUT:-$((2 * (SMARTSIM_WLM_TRIALS + 1) + 150))}"
+    if [[ ! "${SMARTSIM_ENDPOINT_TIMEOUT}" =~ ^[1-9][0-9]{0,6}$ ]]; then
+            echo "SMARTSIM_ENDPOINT_TIMEOUT must be a positive integer in seconds (at most 9999999)." >&2
+            exit 1
+    fi
+
     "${SMARTSIM_PYTHON}" "${SMARTSIM_CONTROLLER}" "${CONTROLLER_ARGS[@]}" &
     DRIVER_PID=$!
 
     cleanup() {
             if [[ -n "${DRIVER_PID:-}" ]] && kill -0 "${DRIVER_PID}" 2>/dev/null; then
                     touch "${DONE_FILE}" || true
-                    wait "${DRIVER_PID}" || true
+                    # A controller still starting may not observe the done file.
+                    for _ in {1..60}; do
+                            kill -0 "${DRIVER_PID}" 2>/dev/null || break
+                            sleep 0.5
+                    done
+                    if kill -0 "${DRIVER_PID}" 2>/dev/null; then
+                            echo "SmartSim controller did not stop; terminating it (a DB step may need manual cleanup)." >&2
+                            kill "${DRIVER_PID}" 2>/dev/null || true
+                            for _ in {1..10}; do
+                                    kill -0 "${DRIVER_PID}" 2>/dev/null || break
+                                    sleep 0.5
+                            done
+                            if kill -0 "${DRIVER_PID}" 2>/dev/null; then
+                                    kill -KILL "${DRIVER_PID}" 2>/dev/null || true
+                            fi
+                    fi
+            fi
+            if [[ -n "${DRIVER_PID:-}" ]]; then
+                    wait "${DRIVER_PID}"
             fi
     }
-    trap cleanup EXIT
+    trap 'cleanup || true' EXIT
 
     echo "Waiting for SmartSim database to start..."
-    for _ in {1..120}; do
+    for (( endpoint_poll = 0; endpoint_poll < SMARTSIM_ENDPOINT_TIMEOUT * 2; endpoint_poll++ )); do
+            if ! kill -0 "${DRIVER_PID}" 2>/dev/null; then
+                    if wait "${DRIVER_PID}"; then
+                            echo "SmartSim controller exited before producing an endpoint." >&2
+                    else
+                            echo "SmartSim controller failed before producing an endpoint; a DB step may need manual cleanup." >&2
+                    fi
+                    exit 1
+            fi
             if [[ -s "${ENDPOINT_FILE}" ]]; then
                     break
             fi
@@ -319,7 +363,13 @@ if [[ "${PROVIDER}" == "SMARTSIM" ]]; then
     mpirun -x MODULE_TEST_RUN_ID -x PROVIDER -x API_MODE -x STEPS -x MODEL -x MERGE_STRATEGY -x TIMING_LOG -x MLCOUPLING_INTRA_OP_THREADS -x MLCOUPLING_INTER_OP_THREADS -x BATCH_SIZE "${SCOREP_MX_FLAGS[@]}" -n "${CLIENTS}" "${WRAPPER[@]}" "${SOLVER_BIN}" "${CONFIG_FILE}"
 
     touch "${DONE_FILE}"
-    wait "${DRIVER_PID}"
+    controller_status=0
+    cleanup || controller_status=$?
+    trap - EXIT
+    if (( controller_status != 0 )); then
+        echo "SmartSim controller failed during shutdown (exit ${controller_status}); a DB step may need manual cleanup." >&2
+        exit "${controller_status}"
+    fi
 
 # 2. AIX Provider
 elif [[ "${PROVIDER}" == "AIX" ]]; then
@@ -337,7 +387,8 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     PHYDLL_PY_SCOREP_WRAPPER=${PHYDLL_PY_SCOREP_WRAPPER:-0}
     DL_CLIENT_CMD=()
     if [[ "${USE_PYTHON_DL_CLIENT}" == "1" ]]; then
-            if ! "${SMARTSIM_PYTHON}" -c 'import numpy, torch; from mpi4py import MPI'; then
+            # The check runs outside mpirun; loading mpi4py must not initialize MPI here.
+            if ! "${SMARTSIM_PYTHON}" -c 'import numpy, torch, mpi4py; mpi4py.rc.initialize = False; mpi4py.rc.finalize = False; from mpi4py import MPI'; then
                 echo "PHYDLL Python dependencies unavailable in ${SMARTSIM_PYTHON}; set SMARTSIM_PYTHON to a Torch/NumPy/mpi4py runtime compatible with mpirun." >&2
                 exit 1
             fi
@@ -347,7 +398,7 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
                     exit 1
                 fi
                 SCOREP_BIN_DIR="$(dirname "$(command -v scorep-config)")"
-                DL_CLIENT_CMD=("env" "PATH=${SCOREP_BIN_DIR}:${PATH}" "${SMARTSIM_PYTHON}" "-m" "scorep" "--keep-files" "--instrumenter-type=dummy" "--noinstrumenter" "--mpp=${SCOREP_MPP}" "${CMI_DIR}/dl_clients/phydll_dl_client.py")
+                DL_CLIENT_CMD=("env" "PATH=${SCOREP_BIN_DIR}:${PATH}" "${SMARTSIM_PYTHON}" "-m" "scorep" "--keep-files" "--instrumenter-type=cProfile" "--noinstrumenter" "--mpp=${SCOREP_MPP}" "${CMI_DIR}/dl_clients/phydll_dl_client.py")
             else
                 DL_CLIENT_CMD=("${SMARTSIM_PYTHON}" "${CMI_DIR}/dl_clients/phydll_dl_client.py")
             fi
@@ -420,8 +471,20 @@ elif [[ "${PROVIDER}" == "PHYDLL" ]]; then
     PHYDLL_LIB_BUILD_DIR_DEFAULT="${CMI_DIR}/extern/phydll/build"
     PHYDLL_LIB_BUILD_DIR="${PHYDLL_LIB_BUILD_DIR:-${PHYDLL_LIB_BUILD_DIR_DEFAULT}}"
     PHYDLL_LIB_DIR=$(realpath "${PHYDLL_LIB_BUILD_DIR}/lib")
+    PHYDLL_DL_LD_LIBRARY_PATH="${PHYDLL_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    # On CPU compute nodes the CUDA driver (libcuda.so.1) is absent, but the
+    # DL client was linked against CUDA-enabled Torch.  Provide the toolkit's
+    # stub driver so the loader succeeds; CPU inference never calls the GPU.
+    if [[ "${DEVICE}" == "CPU" ]] \
+            && [[ ! -e /usr/lib64/libcuda.so.1 && ! -e /lib64/libcuda.so.1 ]]; then
+        CUDA_STUB_DIR="${CUDA_HOME:-${CUDA_ROOT:-}}/lib64/stubs"
+        if [[ -f "${CUDA_STUB_DIR}/libcuda.so.1" ]]; then
+            PHYDLL_DL_LD_LIBRARY_PATH="${CUDA_STUB_DIR}:${PHYDLL_DL_LD_LIBRARY_PATH}"
+            echo "Using CUDA stub libcuda for CPU PhyDLL DL client: ${CUDA_STUB_DIR}"
+        fi
+    fi
     PHY_APP_ENV+=(-x LD_LIBRARY_PATH="${PHYDLL_LIB_DIR}:${LD_LIBRARY_PATH:-}")
-    DL_APP_ENV+=(-x LD_LIBRARY_PATH="${PHYDLL_LIB_DIR}:${LD_LIBRARY_PATH:-}")
+    DL_APP_ENV+=(-x LD_LIBRARY_PATH="${PHYDLL_DL_LD_LIBRARY_PATH}")
 
     # MPMD split: solver uses color=0; DL client uses MPI_UNDEFINED (no MPI_APPNUM reliance).
     echo "Launching PhyDLL with NP_PHY=${NP_PHY}, NP_DL=${NP_DL}, using ${DEVICE}"
